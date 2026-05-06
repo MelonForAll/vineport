@@ -12,7 +12,7 @@ A lightweight launcher that uses [Wine Staging](https://www.winehq.org/) to run 
 
 ```bash
 # Clone the repo
-git clone https://github.com/felixroberge/winesteam.git
+git clone https://github.com/melonforall/winesteam.git
 cd winesteam
 
 # Run setup (downloads Wine Staging ~190MB)
