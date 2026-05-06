@@ -106,6 +106,10 @@ winesteam/
 - [Gcenx](https://github.com/Gcenx/macOS_Wine_builds) — pre-built Wine binaries for macOS
 - [MoltenVK](https://github.com/KhronosGroup/MoltenVK) — Vulkan -> Metal translation
 
+## Disclaimer
+
+Steam is a trademark of Valve Corporation. This project is not affiliated with or endorsed by Valve. Running Steam under Wine may not comply with Valve's Steam Subscriber Agreement — use at your own risk. Valve has historically been tolerant of Wine-based usage (they develop Proton), but makes no guarantees for third-party compatibility layers.
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Wine itself is LGPL v2.1.

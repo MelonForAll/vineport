@@ -8,6 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WINE_DIR="${SCRIPT_DIR}/wine"
 WINE_VERSION="11.7"
 WINE_URL="https://github.com/Gcenx/macOS_Wine_builds/releases/download/wine-staging-${WINE_VERSION}/wine-staging-${WINE_VERSION}-osx64.tar.xz"
+WINE_SHA256="fd0b9e54c7c17d972d922b686301c37fe4f3e9986f01f49fdff858118c045d94"
 
 echo "=== WineSteam Setup ==="
 echo ""
@@ -32,12 +33,23 @@ if [[ -d "${WINE_DIR}/bin" ]]; then
 else
     echo "Downloading Wine Staging ${WINE_VERSION}..."
 
-    TARBALL="/tmp/wine-staging-${WINE_VERSION}-osx64.tar.xz"
     if [[ -f "$HOME/Downloads/wine-staging-${WINE_VERSION}-osx64.tar.xz" ]]; then
         TARBALL="$HOME/Downloads/wine-staging-${WINE_VERSION}-osx64.tar.xz"
         echo "  (Using existing download from ~/Downloads)"
     else
+        TARBALL="$(mktemp /tmp/wine-staging-XXXXXX.tar.xz)"
         curl -L -o "${TARBALL}" "${WINE_URL}"
+    fi
+
+    # Verify download integrity
+    echo "Verifying checksum..."
+    ACTUAL_SHA256="$(shasum -a 256 "${TARBALL}" | awk '{print $1}')"
+    if [[ "${ACTUAL_SHA256}" != "${WINE_SHA256}" ]]; then
+        echo "ERROR: Checksum mismatch!" >&2
+        echo "  Expected: ${WINE_SHA256}" >&2
+        echo "  Got:      ${ACTUAL_SHA256}" >&2
+        echo "  The download may be corrupted or tampered with." >&2
+        exit 1
     fi
 
     echo "Extracting..."

@@ -36,10 +36,10 @@ let logFile = logDir.appendingPathComponent("winesteam-\(formatter.string(from: 
 let proc = Process()
 proc.executableURL = URL(fileURLWithPath: "/bin/bash")
 proc.arguments = ["-c", """
-    exec > "\(logFile.path)" 2>&1
+    exec > "$1" 2>&1
     echo "=== WineSteam started at $(date) ==="
-    exec "\(launcherPath)" "$@"
-    """]
+    exec "$2"
+    """, "--", logFile.path, launcherPath]
 proc.currentDirectoryURL = URL(fileURLWithPath: appDir)
 proc.standardInput = FileHandle.nullDevice
 

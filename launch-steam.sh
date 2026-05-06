@@ -1,7 +1,7 @@
 #!/bin/bash
 # launch-steam.sh — Open-source Wine launcher for Windows Steam on Apple Silicon
 # Uses Wine Staging (LGPL), running under Rosetta 2 on macOS.
-# No proprietary components — fully redistributable.
+# The launcher scripts are MIT-licensed. Steam is proprietary software by Valve.
 
 # ── Paths ──────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -38,10 +38,10 @@ if [[ ! -d "${WINEPREFIX}/drive_c" ]]; then
     STEAM_PATH="${WINEPREFIX}/drive_c/Program Files (x86)/Steam/steam.exe"
     if [[ ! -f "${STEAM_PATH}" ]]; then
         echo "Downloading Steam installer..."
-        INSTALLER="/tmp/SteamSetup.exe"
         if [[ -f "$HOME/Downloads/SteamSetup.exe" ]]; then
             INSTALLER="$HOME/Downloads/SteamSetup.exe"
         else
+            INSTALLER="$(mktemp /tmp/SteamSetup.XXXXXX.exe)"
             curl -L -o "${INSTALLER}" "https://cdn.cloudflare.steamstatic.com/client/installer/SteamSetup.exe" 2>/dev/null
         fi
         echo "Installing Steam (this takes a few minutes)..."
@@ -127,7 +127,6 @@ fi
 cleanup() {
     [[ -n "$DISMISS_PID" ]] && kill $DISMISS_PID 2>/dev/null
     "${WINESERVER}" -k 2>/dev/null
-    pkill -9 -f "${WINEPREFIX}.*wineserver" 2>/dev/null
 }
 trap cleanup INT TERM HUP
 
