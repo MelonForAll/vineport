@@ -1,0 +1,22 @@
+# Wine runtime (downloaded by setup.sh, not checked in)
+wine/
+
+# Convenience symlinks created by setup.sh (point into wine/)
+bin
+lib
+share
+
+# Compiled binaries (build from source with `make`)
+steamwebhelper_wrapper.exe
+WineSteam.app/Contents/MacOS/WineSteamLauncher
+WineSteam.app/Contents/_CodeSignature/
+
+# macOS junk
+.DS_Store
+*.swp
+
+# Logs
+*.log
+
+# App icon (users provide their own)
+WineSteam.app/Contents/Resources/AppIcon.icns

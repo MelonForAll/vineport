@@ -1,0 +1,17 @@
+#!/bin/bash
+# WineSteam.app launcher
+SCRIPT_DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
+LAUNCHER="${SCRIPT_DIR}/launch-steam.sh"
+
+if [[ ! -x "${LAUNCHER}" ]]; then
+    osascript -e 'display dialog "WineSteam launcher not found.\n\nMake sure WineSteam.app is inside the WineSteam folder next to launch-steam.sh" with title "WineSteam" buttons {"OK"} default button "OK" with icon stop'
+    exit 1
+fi
+
+LOG_DIR="$HOME/Library/Logs/WineSteam"
+mkdir -p "${LOG_DIR}"
+LOG_FILE="${LOG_DIR}/winesteam-$(date +%Y%m%d-%H%M%S).log"
+exec > "${LOG_FILE}" 2>&1
+
+echo "=== WineSteam started at $(date) ==="
+exec "${LAUNCHER}" "$@"
