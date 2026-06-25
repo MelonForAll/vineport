@@ -1,16 +1,22 @@
 #!/bin/bash
-# winesteam — Steam-native CLI for WineSteam
-# Manages games, per-game profiles, and launches with custom Wine settings.
+# vineport — Game launcher CLI for Vineport
+# Manages Steam and Epic Games, per-game profiles, and launches with custom Wine settings.
 #
 # Usage:
-#   winesteam games                    List installed Steam games
-#   winesteam launch <appid>           Launch a game by AppID
-#   winesteam launch <name>            Launch a game by name (partial match)
-#   winesteam profile <appid>          Show profile for a game
-#   winesteam profile <appid> --set KEY=VALUE   Set a profile option
-#   winesteam profile <appid> --reset  Reset profile to defaults
-#   winesteam steam                    Launch Steam client
-#   winesteam info <appid>             Show detailed game info
+#   vineport games                    List installed Steam games
+#   vineport launch <appid|name>      Launch a game
+#   vineport info <appid|name>        Show game details & compatibility
+#   vineport profile <appid> [opts]   Manage per-game Wine settings
+#   vineport steam                    Launch Steam client
+#
+# Epic Games (via Legendary):
+#   vineport epic login               Log in to Epic Games
+#   vineport epic games               List your Epic Games library
+#   vineport epic install <name>      Install an Epic game
+#   vineport epic launch <name>       Launch an Epic game
+#   vineport epic info <name>         Show Epic game details
+#   vineport epic update <name>       Update an Epic game
+#   vineport epic uninstall <name>    Uninstall an Epic game
 
 set -euo pipefail
 
@@ -18,17 +24,17 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Detect .app bundle context
 if [[ "${SCRIPT_DIR}" == *".app/Contents/Resources"* ]]; then
-    SUPPORT_DIR="${HOME}/Library/Application Support/WineSteam"
+    SUPPORT_DIR="${HOME}/Library/Application Support/Vineport"
     WINE_DIR="${SUPPORT_DIR}/wine"
 else
     WINE_DIR="${SCRIPT_DIR}/wine"
 fi
 
 WINE_BIN="${WINE_DIR}/bin"
-DEFAULT_PREFIX="$HOME/Library/Application Support/WineSteam"
+DEFAULT_PREFIX="$HOME/Library/Application Support/Vineport"
 WINEPREFIX="${WINEPREFIX:-${DEFAULT_PREFIX}}"
 STEAMAPPS="${WINEPREFIX}/drive_c/Program Files (x86)/Steam/steamapps"
-PROFILES_DIR="${HOME}/.config/winesteam"
+PROFILES_DIR="${HOME}/.config/vineport"
 PROFILES_FILE="${PROFILES_DIR}/profiles.json"
 
 # ── Colors ────────────────────────────────────────────────────────────
@@ -73,98 +79,103 @@ ENDJSON
     fi
 }
 
-# Read a profile value using python3 (available on all macOS)
+# Read a profile value using python3 (available on all macOS).
+# Values are passed via the environment, never interpolated into Python source,
+# so quotes/backslashes in inputs can't break or inject into the script.
 profile_get() {
     local appid="$1" key="$2"
-    python3 -c "
-import json, sys
-with open('${PROFILES_FILE}') as f:
+    VP_FILE="${PROFILES_FILE}" VP_APPID="$appid" VP_KEY="$key" python3 -c '
+import json, os
+with open(os.environ["VP_FILE"]) as f:
     data = json.load(f)
-games = data.get('games', {})
-profile = games.get('${appid}', data.get('default', {}))
-val = profile.get('${key}', data.get('default', {}).get('${key}', ''))
+games = data.get("games", {})
+profile = games.get(os.environ["VP_APPID"], data.get("default", {}))
+key = os.environ["VP_KEY"]
+val = profile.get(key, data.get("default", {}).get(key, ""))
 if isinstance(val, dict):
-    import json as j
-    print(j.dumps(val))
+    print(json.dumps(val))
 elif isinstance(val, bool):
-    print('true' if val else 'false')
+    print("true" if val else "false")
 else:
     print(val)
-" 2>/dev/null
+' 2>/dev/null
 }
 
 # Set a profile value
 profile_set() {
     local appid="$1" key="$2" value="$3"
-    python3 -c "
-import json
-with open('${PROFILES_FILE}') as f:
+    VP_FILE="${PROFILES_FILE}" VP_APPID="$appid" VP_KEY="$key" VP_VALUE="$value" python3 -c '
+import json, os
+appid = os.environ["VP_APPID"]; key = os.environ["VP_KEY"]; value = os.environ["VP_VALUE"]
+with open(os.environ["VP_FILE"]) as f:
     data = json.load(f)
-if 'games' not in data:
-    data['games'] = {}
-if '${appid}' not in data['games']:
-    data['games']['${appid}'] = dict(data.get('default', {}))
+if "games" not in data:
+    data["games"] = {}
+if appid not in data["games"]:
+    data["games"][appid] = dict(data.get("default", {}))
 # Type coercion
-val = '${value}'
-if val.lower() == 'true': val = True
-elif val.lower() == 'false': val = False
+val = value
+if val.lower() == "true": val = True
+elif val.lower() == "false": val = False
 elif val.isdigit(): val = int(val)
-data['games']['${appid}']['${key}'] = val
-with open('${PROFILES_FILE}', 'w') as f:
+data["games"][appid][key] = val
+with open(os.environ["VP_FILE"], "w") as f:
     json.dump(data, f, indent=2)
-print('Set ${key}=${value} for AppID ${appid}')
-"
+print("Set %s=%s for AppID %s" % (key, value, appid))
+'
 }
 
 # Set an environment variable in a game's profile
 profile_set_env() {
     local appid="$1" env_key="$2" env_val="$3"
-    python3 -c "
-import json
-with open('${PROFILES_FILE}') as f:
+    VP_FILE="${PROFILES_FILE}" VP_APPID="$appid" VP_EKEY="$env_key" VP_EVAL="$env_val" python3 -c '
+import json, os
+appid = os.environ["VP_APPID"]; ekey = os.environ["VP_EKEY"]; eval_ = os.environ["VP_EVAL"]
+with open(os.environ["VP_FILE"]) as f:
     data = json.load(f)
-if 'games' not in data:
-    data['games'] = {}
-if '${appid}' not in data['games']:
-    data['games']['${appid}'] = dict(data.get('default', {}))
-if 'env' not in data['games']['${appid}'] or not isinstance(data['games']['${appid}']['env'], dict):
-    data['games']['${appid}']['env'] = {}
-data['games']['${appid}']['env']['${env_key}'] = '${env_val}'
-with open('${PROFILES_FILE}', 'w') as f:
+if "games" not in data:
+    data["games"] = {}
+if appid not in data["games"]:
+    data["games"][appid] = dict(data.get("default", {}))
+if "env" not in data["games"][appid] or not isinstance(data["games"][appid]["env"], dict):
+    data["games"][appid]["env"] = {}
+data["games"][appid]["env"][ekey] = eval_
+with open(os.environ["VP_FILE"], "w") as f:
     json.dump(data, f, indent=2)
-print('Set env ${env_key}=${env_val} for AppID ${appid}')
-"
+print("Set env %s=%s for AppID %s" % (ekey, eval_, appid))
+'
 }
 
 # Reset a game's profile
 profile_reset() {
     local appid="$1"
-    python3 -c "
-import json
-with open('${PROFILES_FILE}') as f:
+    VP_FILE="${PROFILES_FILE}" VP_APPID="$appid" python3 -c '
+import json, os
+appid = os.environ["VP_APPID"]
+with open(os.environ["VP_FILE"]) as f:
     data = json.load(f)
-if 'games' in data and '${appid}' in data['games']:
-    del data['games']['${appid}']
-with open('${PROFILES_FILE}', 'w') as f:
+if "games" in data and appid in data["games"]:
+    del data["games"][appid]
+with open(os.environ["VP_FILE"], "w") as f:
     json.dump(data, f, indent=2)
-print('Reset profile for AppID ${appid}')
-"
+print("Reset profile for AppID %s" % appid)
+'
 }
 
 # Get all env vars for a game as KEY=VALUE lines
 profile_get_env() {
     local appid="$1"
-    python3 -c "
-import json
-with open('${PROFILES_FILE}') as f:
+    VP_FILE="${PROFILES_FILE}" VP_APPID="$appid" python3 -c '
+import json, os
+with open(os.environ["VP_FILE"]) as f:
     data = json.load(f)
-games = data.get('games', {})
-default_env = data.get('default', {}).get('env', {})
-game_env = games.get('${appid}', {}).get('env', {})
+games = data.get("games", {})
+default_env = data.get("default", {}).get("env", {})
+game_env = games.get(os.environ["VP_APPID"], {}).get("env", {})
 merged = {**default_env, **game_env}
 for k, v in merged.items():
-    print(f'{k}={v}')
-" 2>/dev/null
+    print("%s=%s" % (k, v))
+' 2>/dev/null
 }
 
 # ── Game Discovery ────────────────────────────────────────────────────
@@ -221,12 +232,12 @@ list_games() {
         # Profile indicator
         local profile_mark=""
         if [[ -f "${PROFILES_FILE}" ]]; then
-            if python3 -c "
-import json
-with open('${PROFILES_FILE}') as f:
+            if VP_FILE="${PROFILES_FILE}" VP_APPID="$appid" python3 -c '
+import json, os
+with open(os.environ["VP_FILE"]) as f:
     d = json.load(f)
-exit(0 if '${appid}' in d.get('games', {}) else 1)
-" 2>/dev/null; then
+exit(0 if os.environ["VP_APPID"] in d.get("games", {}) else 1)
+' 2>/dev/null; then
                 profile_mark=" ${CYAN}[profile]${NC}"
             fi
         fi
@@ -237,7 +248,7 @@ exit(0 if '${appid}' in d.get('games', {}) else 1)
     done
 
     echo ""
-    echo -e "${DIM}${count} game(s) found. Use 'winesteam launch <appid>' to play.${NC}"
+    echo -e "${DIM}${count} game(s) found. Use 'vineport launch <appid>' to play.${NC}"
 }
 
 # Find AppID by name (partial, case-insensitive match)
@@ -296,13 +307,43 @@ show_info() {
         fi
     fi
 
+    # Detect anti-cheat mode (user-mode vs kernel-mode)
+    local eac_mode="" battleye_mode=""
+    if [[ $has_eac -eq 1 ]] && [[ -d "$gamedir" ]]; then
+        # Check for EAC config files that indicate mode
+        if find "$gamedir" -maxdepth 3 -name "EasyAntiCheat_EOS_Setup.exe" -print -quit 2>/dev/null | grep -q .; then
+            eac_mode="EOS (newer, user-mode possible)"
+        elif find "$gamedir" -maxdepth 3 -name "EasyAntiCheat_Setup.exe" -print -quit 2>/dev/null | grep -q .; then
+            eac_mode="Legacy (likely kernel-mode)"
+        fi
+        # Check for Linux/Proton EAC support (easyanticheat_x64.so presence)
+        if find "$gamedir" -maxdepth 3 -name "easyanticheat_x64.so" -print -quit 2>/dev/null | grep -q .; then
+            eac_mode="${eac_mode:+${eac_mode}, }Linux/Proton runtime present"
+        fi
+    fi
+    if [[ $has_battleye -eq 1 ]] && [[ -d "$gamedir" ]]; then
+        if find "$gamedir" -maxdepth 3 -name "BEService_x64.exe" -print -quit 2>/dev/null | grep -q .; then
+            battleye_mode="Service-based (kernel driver)"
+        fi
+    fi
+
     echo ""
-    echo -e "  ${BOLD}Compatibility:${NC}"
+    echo -e "  ${BOLD}Anti-Cheat:${NC}"
     if [[ $has_eac -eq 1 ]]; then
-        echo -e "    ${RED}EasyAntiCheat detected — online multiplayer likely won't work${NC}"
+        echo -e "    ${RED}EasyAntiCheat detected${NC}"
+        if [[ -n "$eac_mode" ]]; then
+            echo -e "    Mode: ${eac_mode}"
+        fi
+        echo -e "    Status: Online multiplayer likely won't work"
+        echo -e "    Note: Games with EOS EAC + Linux/Proton support are most"
+        echo -e "          likely to work with future anti-cheat patches."
     fi
     if [[ $has_battleye -eq 1 ]]; then
-        echo -e "    ${RED}BattlEye detected — online multiplayer likely won't work${NC}"
+        echo -e "    ${RED}BattlEye detected${NC}"
+        if [[ -n "$battleye_mode" ]]; then
+            echo -e "    Mode: ${battleye_mode}"
+        fi
+        echo -e "    Status: Online multiplayer likely won't work"
     fi
     if [[ $has_eac -eq 0 ]] && [[ $has_battleye -eq 0 ]]; then
         echo -e "    ${GREEN}No known anti-cheat detected${NC}"
@@ -311,12 +352,12 @@ show_info() {
     # Show profile if set
     echo ""
     echo -e "  ${BOLD}Profile:${NC}"
-    if [[ -f "${PROFILES_FILE}" ]] && python3 -c "
-import json
-with open('${PROFILES_FILE}') as f:
+    if [[ -f "${PROFILES_FILE}" ]] && VP_FILE="${PROFILES_FILE}" VP_APPID="$appid" python3 -c '
+import json, os
+with open(os.environ["VP_FILE"]) as f:
     d = json.load(f)
-exit(0 if '${appid}' in d.get('games', {}) else 1)
-" 2>/dev/null; then
+exit(0 if os.environ["VP_APPID"] in d.get("games", {}) else 1)
+' 2>/dev/null; then
         local dxvk game_args env_vars
         dxvk=$(profile_get "$appid" "dxvk")
         game_args=$(profile_get "$appid" "game_args")
@@ -330,7 +371,7 @@ exit(0 if '${appid}' in d.get('games', {}) else 1)
             done
         fi
     else
-        echo -e "    ${DIM}Using defaults. Set with: winesteam profile ${appid} --set KEY=VALUE${NC}"
+        echo -e "    ${DIM}Using defaults. Set with: vineport profile ${appid} --set KEY=VALUE${NC}"
     fi
 }
 
@@ -384,6 +425,10 @@ show_profile() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --set)
+                if [[ -z "${2:-}" ]]; then
+                    echo "Usage: vineport profile <appid> --set KEY=VALUE" >&2
+                    exit 1
+                fi
                 local kv="$2"
                 local key="${kv%%=*}"
                 local value="${kv#*=}"
@@ -414,50 +459,325 @@ show_profile() {
 
     echo -e "${BOLD}Profile for ${name:-AppID $appid}${NC}"
     echo ""
-    python3 -c "
-import json
-with open('${PROFILES_FILE}') as f:
+    VP_FILE="${PROFILES_FILE}" VP_APPID="$appid" python3 -c '
+import json, os
+appid = os.environ["VP_APPID"]
+with open(os.environ["VP_FILE"]) as f:
     data = json.load(f)
-default = data.get('default', {})
-game = data.get('games', {}).get('${appid}', None)
+default = data.get("default", {})
+game = data.get("games", {}).get(appid, None)
 if game:
-    print('  Custom profile:')
-    print(json.dumps(game, indent=4).replace('{', '  {').replace('}', '  }'))
+    print("  Custom profile:")
+    print(json.dumps(game, indent=4).replace("{", "  {").replace("}", "  }"))
 else:
-    print('  Using defaults:')
-    print(json.dumps(default, indent=4).replace('{', '  {').replace('}', '  }'))
+    print("  Using defaults:")
+    print(json.dumps(default, indent=4).replace("{", "  {").replace("}", "  }"))
 print()
-print('Set options with:')
-print('  winesteam profile ${appid} --set dxvk=true')
-print('  winesteam profile ${appid} --set game_args=\"-windowed\"')
-print('  winesteam profile ${appid} --set env.DXVK_HUD=fps')
-print('  winesteam profile ${appid} --set env.WINEDEBUG=+d3d')
-"
+print("Set options with:")
+print("  vineport profile %s --set dxvk=true" % appid)
+print("  vineport profile %s --set game_args=\"-windowed\"" % appid)
+print("  vineport profile %s --set env.DXVK_HUD=fps" % appid)
+print("  vineport profile %s --set env.WINEDEBUG=+d3d" % appid)
+'
+}
+
+# ── Epic Games (via Legendary) ────────────────────────────────────────
+
+LEGENDARY_CMD=""
+EPIC_INSTALL_DIR="${WINEPREFIX}/drive_c/Epic Games"
+
+# Find or install legendary
+find_legendary() {
+    if [[ -n "$LEGENDARY_CMD" ]]; then return 0; fi
+
+    # Check common locations
+    for cmd in legendary legendary-gl "$HOME/.local/bin/legendary" \
+               "$HOME/Library/Python/3.9/bin/legendary" \
+               "$HOME/Library/Python/3.11/bin/legendary" \
+               "$HOME/Library/Python/3.12/bin/legendary"; do
+        if command -v "$cmd" &>/dev/null; then
+            LEGENDARY_CMD="$cmd"
+            return 0
+        fi
+    done
+
+    # Try python module
+    if python3 -m legendary --help &>/dev/null 2>&1; then
+        LEGENDARY_CMD="python3 -m legendary"
+        return 0
+    fi
+
+    return 1
+}
+
+ensure_legendary() {
+    if find_legendary; then return 0; fi
+
+    echo -e "${YELLOW}Legendary (Epic Games CLI) not found.${NC}"
+    echo ""
+    echo "Installing via pip..."
+    pip3 install legendary-gl 2>&1 | tail -3
+
+    if find_legendary; then
+        echo -e "${GREEN}Legendary installed successfully.${NC}"
+        return 0
+    else
+        echo -e "${RED}Failed to install Legendary.${NC}" >&2
+        echo "Try manually: pip3 install legendary-gl" >&2
+        return 1
+    fi
+}
+
+# Set up Wine + renderer environment for Epic game launches.
+# Sets EPIC_WINE (the wine binary legendary should use) and EPIC_USING_GPTK.
+# Prefers Apple's Game Porting Toolkit (D3DMetal) when installed — reliable for
+# D3D11 and D3D12 — else the bundled Wine (DXVK). VINEPORT_NO_GPTK=1 forces bundled.
+setup_epic_wine_env() {
+    export WINEPREFIX
+    export WINEARCH=win64
+    export WINEDEBUG="${WINEDEBUG:--all}"
+    export WINEMSYNC=1
+    export WINEESYNC=1
+
+    local gptk_wine="/Applications/Game Porting Toolkit.app/Contents/Resources/wine/bin/wine64"
+    if [[ -x "$gptk_wine" && "${VINEPORT_NO_GPTK:-0}" != "1" ]]; then
+        EPIC_WINE="$gptk_wine"
+        EPIC_USING_GPTK=1
+        # Force builtin D3DMetal; drop bundled dylib/datadir so GPTK uses its own
+        # and not the prefix's persistent DXVK override.
+        export WINEDLLOVERRIDES="d3d9,d3d10,d3d10core,d3d11,d3d12,d3d12core,dxgi=b"
+        unset DYLD_LIBRARY_PATH
+        unset WINEDATADIR
+        export PATH="$(dirname "$gptk_wine"):${PATH}"
+        echo -e "  ${DIM}Rendering via Game Porting Toolkit (D3DMetal).${NC}"
+    else
+        EPIC_WINE="${WINE_BIN}/wine"
+        EPIC_USING_GPTK=0
+        export WINEDATADIR="${WINE_DIR}/share/wine"
+        export DYLD_LIBRARY_PATH="${WINE_DIR}/lib"
+        export PATH="${WINE_BIN}:${PATH}"
+    fi
+}
+
+epic_login() {
+    ensure_legendary || return 1
+    echo -e "${BOLD}Logging in to Epic Games...${NC}"
+    echo ""
+    $LEGENDARY_CMD auth
+}
+
+epic_list_games() {
+    ensure_legendary || return 1
+    echo -e "${BOLD}Epic Games Library${NC}"
+    echo ""
+    $LEGENDARY_CMD list 2>/dev/null | head -100
+}
+
+epic_install() {
+    local game_name="$1"
+    ensure_legendary || return 1
+
+    # Create Epic Games install directory inside Wine prefix
+    mkdir -p "${EPIC_INSTALL_DIR}"
+
+    echo -e "${BOLD}Installing ${game_name}...${NC}"
+    echo -e "  Install path: ${EPIC_INSTALL_DIR}/${game_name}"
+    echo ""
+
+    # Legendary installs the Windows version of the game
+    $LEGENDARY_CMD install "$game_name" \
+        --base-path "${EPIC_INSTALL_DIR}" \
+        --platform Windows
+}
+
+epic_launch() {
+    local game_name="$1"
+    ensure_legendary || return 1
+
+    echo -e "${BOLD}Launching Epic game: ${game_name}${NC}"
+
+    setup_epic_wine_env
+
+    # Apply per-game profile if set (use epic: prefix for epic game IDs)
+    local profile_id="epic:${game_name}"
+    local env_vars
+    env_vars=$(profile_get_env "$profile_id" 2>/dev/null || true)
+    if [[ -n "$env_vars" ]]; then
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && export "$line"
+        done <<< "$env_vars"
+    fi
+
+    # Check DXVK setting (ignored under GPTK, which renders via D3DMetal — a native
+    # DXVK override there would need Vulkan and break the launch).
+    local dxvk
+    dxvk=$(profile_get "$profile_id" "dxvk" 2>/dev/null || echo "false")
+    if [[ "$dxvk" == "true" && "${EPIC_USING_GPTK:-0}" != "1" ]]; then
+        export WINEDLLOVERRIDES="d3d11,d3d10core,dxgi,d3d9=n,b;${WINEDLLOVERRIDES:-}"
+    fi
+
+    # Get extra game args from profile
+    local game_args
+    game_args=$(profile_get "$profile_id" "game_args" 2>/dev/null || true)
+
+    echo ""
+
+    # If the game bundles Easy Anti-Cheat, run with the EOS null client so it
+    # launches for offline/singleplayer play. (Online anti-cheat won't connect.)
+    local gamedir="${WINEPREFIX}/drive_c/Epic Games/${game_name}"
+    if find "$gamedir" -maxdepth 4 -iname "*EasyAntiCheat*" -print -quit 2>/dev/null | grep -q .; then
+        export EOS_USE_ANTICHEATCLIENTNULL=1
+        echo -e "  ${DIM}Anti-cheat detected — launching offline (EOS null client).${NC}"
+    fi
+
+    # Use legendary to launch, telling it which Wine to use (GPTK/D3DMetal when
+    # available, else bundled) and our prefix.
+    $LEGENDARY_CMD launch "$game_name" \
+        --wine "${EPIC_WINE}" \
+        --wine-prefix "${WINEPREFIX}" \
+        $game_args \
+        2>&1
+}
+
+epic_info() {
+    local game_name="$1"
+    ensure_legendary || return 1
+
+    echo -e "${BOLD}Epic Game Info: ${game_name}${NC}"
+    echo ""
+    $LEGENDARY_CMD info "$game_name" 2>/dev/null
+
+    # Check for EAC in the installed game
+    local game_dir="${EPIC_INSTALL_DIR}/${game_name}"
+    if [[ -d "$game_dir" ]]; then
+        echo ""
+        echo -e "  ${BOLD}Anti-Cheat:${NC}"
+        local has_eac=0 has_battleye=0
+        if find "$game_dir" -maxdepth 4 -iname "*EasyAntiCheat*" -print -quit 2>/dev/null | grep -q .; then
+            has_eac=1
+        fi
+        if find "$game_dir" -maxdepth 4 -iname "*BattlEye*" -print -quit 2>/dev/null | grep -q .; then
+            has_battleye=1
+        fi
+
+        if [[ $has_eac -eq 1 ]]; then
+            echo -e "    ${RED}EasyAntiCheat detected${NC}"
+            # Check for EOS vs legacy
+            if find "$game_dir" -maxdepth 4 -name "EasyAntiCheat_EOS_Setup.exe" -print -quit 2>/dev/null | grep -q .; then
+                echo -e "    Mode: EOS (newer, user-mode)"
+            fi
+            echo ""
+            echo -e "    EAC files:"
+            find "$game_dir" -maxdepth 4 \( -iname "*EasyAntiCheat*" -o -iname "*eac*" \) 2>/dev/null | while IFS= read -r f; do
+                echo "      $(basename "$f")"
+            done
+        fi
+        if [[ $has_battleye -eq 1 ]]; then
+            echo -e "    ${RED}BattlEye detected${NC}"
+        fi
+        if [[ $has_eac -eq 0 ]] && [[ $has_battleye -eq 0 ]]; then
+            echo -e "    ${GREEN}No known anti-cheat detected${NC}"
+        fi
+    fi
+}
+
+epic_update() {
+    local game_name="$1"
+    ensure_legendary || return 1
+    echo -e "${BOLD}Updating ${game_name}...${NC}"
+    $LEGENDARY_CMD update "$game_name"
+}
+
+epic_uninstall() {
+    local game_name="$1"
+    ensure_legendary || return 1
+    echo -e "${BOLD}Uninstalling ${game_name}...${NC}"
+    $LEGENDARY_CMD uninstall "$game_name"
+}
+
+# Handle all epic subcommands
+handle_epic() {
+    local subcmd="${1:-}"
+    shift 2>/dev/null || true
+
+    case "$subcmd" in
+        login|auth)
+            epic_login
+            ;;
+        games|list|ls)
+            epic_list_games
+            ;;
+        install)
+            [[ -z "${1:-}" ]] && { echo "Usage: vineport epic install <game-name>"; exit 1; }
+            epic_install "$1"
+            ;;
+        launch|play|run)
+            [[ -z "${1:-}" ]] && { echo "Usage: vineport epic launch <game-name>"; exit 1; }
+            epic_launch "$1"
+            ;;
+        info|show)
+            [[ -z "${1:-}" ]] && { echo "Usage: vineport epic info <game-name>"; exit 1; }
+            epic_info "$1"
+            ;;
+        update)
+            [[ -z "${1:-}" ]] && { echo "Usage: vineport epic update <game-name>"; exit 1; }
+            epic_update "$1"
+            ;;
+        uninstall|remove)
+            [[ -z "${1:-}" ]] && { echo "Usage: vineport epic uninstall <game-name>"; exit 1; }
+            epic_uninstall "$1"
+            ;;
+        help|--help|-h|"")
+            echo -e "${BOLD}Vineport — Epic Games${NC} (via Legendary)"
+            echo ""
+            echo "Usage:"
+            echo "  vineport epic login               Log in to Epic Games"
+            echo "  vineport epic games               List your Epic library"
+            echo "  vineport epic install <name>      Install a game"
+            echo "  vineport epic launch <name>       Launch a game through Wine"
+            echo "  vineport epic info <name>         Show game details & anti-cheat"
+            echo "  vineport epic update <name>       Update a game"
+            echo "  vineport epic uninstall <name>    Uninstall a game"
+            echo ""
+            echo "Game names use the Epic app name (e.g., 'Sugar' for Rocket League)."
+            echo "Run 'vineport epic games' to see available names."
+            ;;
+        *)
+            echo -e "${RED}Unknown epic command: ${subcmd}${NC}" >&2
+            echo "Run 'vineport epic help' for usage."
+            exit 1
+            ;;
+    esac
 }
 
 # ── Usage ─────────────────────────────────────────────────────────────
 usage() {
-    echo -e "${BOLD}WineSteam${NC} — Steam-native Wine launcher for macOS"
+    echo -e "${BOLD}Vineport${NC} — Wine game launcher for macOS"
     echo ""
-    echo "Usage:"
-    echo "  winesteam games                         List installed Steam games"
-    echo "  winesteam launch <appid|name>           Launch a game"
-    echo "  winesteam info <appid|name>             Show game details & compatibility"
-    echo "  winesteam profile <appid> [options]     Manage per-game Wine settings"
-    echo "  winesteam steam                         Launch Steam client"
+    echo "Steam:"
+    echo "  vineport games                         List installed Steam games"
+    echo "  vineport launch <appid|name>           Launch a Steam game"
+    echo "  vineport info <appid|name>             Show game details & compatibility"
+    echo "  vineport profile <appid> [options]     Manage per-game Wine settings"
+    echo "  vineport steam                         Launch Steam client"
+    echo ""
+    echo "Epic Games:"
+    echo "  vineport epic login                    Log in to Epic Games"
+    echo "  vineport epic games                    List your Epic library"
+    echo "  vineport epic install <name>           Install an Epic game"
+    echo "  vineport epic launch <name>            Launch an Epic game"
+    echo "  vineport epic info <name>              Show Epic game details"
     echo ""
     echo "Profile options:"
     echo "  --set KEY=VALUE    Set a profile value (dxvk, game_args, env.VAR)"
     echo "  --reset            Reset profile to defaults"
     echo ""
     echo "Examples:"
-    echo "  winesteam games"
-    echo "  winesteam launch 739630"
-    echo "  winesteam launch phasmophobia"
-    echo "  winesteam profile 739630 --set dxvk=true"
-    echo "  winesteam profile 739630 --set env.DXVK_HUD=fps"
-    echo "  winesteam profile 739630 --set game_args=\"-windowed\""
-    echo "  winesteam info 1245620"
+    echo "  vineport games"
+    echo "  vineport launch 739630"
+    echo "  vineport epic login"
+    echo "  vineport epic install Sugar"
+    echo "  vineport epic launch Sugar"
 }
 
 # ── Resolve AppID (number or name search) ─────────────────────────────
@@ -483,23 +803,27 @@ case "${1:-}" in
         list_games
         ;;
     launch|play|run)
-        [[ -z "${2:-}" ]] && { echo "Usage: winesteam launch <appid|name>"; exit 1; }
+        [[ -z "${2:-}" ]] && { echo "Usage: vineport launch <appid|name>"; exit 1; }
         appid=$(resolve_appid "$2")
         launch_game "$appid"
         ;;
     info|show)
-        [[ -z "${2:-}" ]] && { echo "Usage: winesteam info <appid|name>"; exit 1; }
+        [[ -z "${2:-}" ]] && { echo "Usage: vineport info <appid|name>"; exit 1; }
         appid=$(resolve_appid "$2")
         show_info "$appid"
         ;;
     profile|config)
-        [[ -z "${2:-}" ]] && { echo "Usage: winesteam profile <appid> [--set KEY=VALUE | --reset]"; exit 1; }
+        [[ -z "${2:-}" ]] && { echo "Usage: vineport profile <appid> [--set KEY=VALUE | --reset]"; exit 1; }
         appid=$(resolve_appid "$2")
         shift 2
         show_profile "$appid" "$@"
         ;;
     steam)
         exec "${SCRIPT_DIR}/launch-steam.sh" "${@:2}"
+        ;;
+    epic)
+        shift
+        handle_epic "$@"
         ;;
     help|--help|-h)
         usage

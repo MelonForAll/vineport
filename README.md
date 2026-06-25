@@ -42,9 +42,9 @@ Or double-click **WineSteam.app** after running setup.
 
 ## Game Compatibility
 
-- **Works well:** Most indie games, many AAA single-player titles, DX9/10/11 games
-- **Hit or miss:** DirectX 12 games
-- **Won't work:** Games with kernel-level anti-cheat (EAC, BattlEye, Vanguard)
+- **Works well:** Most indie games, many AAA single-player titles, DX9/10/11 games. With **Apple's Game Porting Toolkit** installed, DirectX 12 games also work (Vineport launches them through GPTK's D3DMetal — verified with Elden Ring).
+- **DirectX 12 without GPTK:** the bundled vkd3d-proton → MoltenVK path can't initialize D3D12 on macOS, so **install Game Porting Toolkit** for DX12 titles: `brew install --cask gcenx/wine/game-porting-toolkit`.
+- **Anti-cheat (EAC, BattlEye, Vanguard):** Online/multiplayer is **not supported** — Vineport does not circumvent anti-cheat. Many titles that bundle anti-cheat still have a singleplayer/offline mode; for those, Vineport offers a **"Play Offline (No Anti-Cheat)"** launch that runs the game without its anti-cheat. This only works offline.
 
 Check [ProtonDB](https://www.protondb.com/) for game-specific reports — if a game runs on Linux/Proton, it will likely work here.
 

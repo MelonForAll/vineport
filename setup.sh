@@ -1,5 +1,5 @@
 #!/bin/bash
-# WineSteam Setup — Downloads and configures Wine Staging for running Windows Steam on macOS
+# Vineport Setup — Downloads and configures Wine Staging for running Windows Steam on macOS
 # Supports Apple Silicon (M1/M2/M3/M4) via Rosetta 2
 #
 # Usage: ./setup.sh [--target-dir DIR] [--quiet]
@@ -18,7 +18,7 @@ TARGET_DIR=""
 QUIET=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --target-dir) TARGET_DIR="$2"; shift 2 ;;
+        --target-dir) [[ $# -ge 2 ]] || { echo "ERROR: --target-dir requires a value" >&2; exit 1; }; TARGET_DIR="$2"; shift 2 ;;
         --quiet) QUIET=1; shift ;;
         *) shift ;;
     esac
@@ -31,7 +31,7 @@ CREATE_SYMLINKS=1
 log() { [[ $QUIET -eq 0 ]] && echo "$@" || true; }
 progress() { echo "PROGRESS:$1"; }
 
-log "=== WineSteam Setup ==="
+log "=== Vineport Setup ==="
 log ""
 
 # Check architecture
@@ -48,8 +48,10 @@ else
 fi
 log ""
 
-# Download Wine if not present
-if [[ -d "${WINE_DIR}/bin" ]]; then
+# Download Wine if not present.
+# Check the wine binary AND lib/ AND share/ — not just bin/ — so an install that
+# was interrupted mid-copy is treated as incomplete and re-done, not "complete".
+if [[ -x "${WINE_DIR}/bin/wine" && -d "${WINE_DIR}/lib" && -d "${WINE_DIR}/share" ]]; then
     log "  Wine: already installed at ${WINE_DIR}"
     progress "done"
 else
@@ -89,10 +91,17 @@ else
 
     WINE_RESOURCES="${WINE_APP}/Contents/Resources/wine"
 
-    mkdir -p "${WINE_DIR}"
-    cp -R "${WINE_RESOURCES}/bin" "${WINE_DIR}/bin"
-    cp -R "${WINE_RESOURCES}/lib" "${WINE_DIR}/lib"
-    cp -R "${WINE_RESOURCES}/share" "${WINE_DIR}/share"
+    # Stage into a temp dir on the same filesystem, then move into place in one
+    # atomic rename. An interrupted copy never leaves a half-installed (and
+    # falsely "complete") Wine tree at ${WINE_DIR}.
+    PARENT_DIR="$(dirname "${WINE_DIR}")"
+    mkdir -p "${PARENT_DIR}"
+    STAGING_DIR="$(mktemp -d "${WINE_DIR}.staging.XXXXXX")"
+    cp -R "${WINE_RESOURCES}/bin"   "${STAGING_DIR}/bin"
+    cp -R "${WINE_RESOURCES}/lib"   "${STAGING_DIR}/lib"
+    cp -R "${WINE_RESOURCES}/share" "${STAGING_DIR}/share"
+    rm -rf "${WINE_DIR}"
+    mv "${STAGING_DIR}" "${WINE_DIR}"
 
     rm -rf "${EXTRACT_DIR}"
 
@@ -111,5 +120,5 @@ log ""
 log "Setup complete! Launch Steam with:"
 log "  ./launch-steam.sh"
 log ""
-log "Or double-click WineSteam.app"
+log "Or double-click Vineport.app"
 log ""

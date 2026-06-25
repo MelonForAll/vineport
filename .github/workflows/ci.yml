@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Lint shell scripts
+        # -x follows sourced files (common.sh). --severity=warning catches the
+        # real bug classes (unquoted vars, missing cd guards, etc.) while
+        # ignoring pure style notes.
+        #
+        # NOTE: this is currently non-blocking (continue-on-error) so it reports
+        # findings without failing the build. Once the remaining warnings are
+        # cleaned up, set continue-on-error to false to make it a hard gate.
+        continue-on-error: true
+        run: |
+          shellcheck -x --severity=warning \
+            common.sh \
+            launch-steam.sh \
+            launch-steam-game.sh \
+            launch-steam-gptk.sh \
+            launch-epic-game.sh \
+            setup.sh \
+            build-wine.sh \
+            dismiss-dialogs.sh \
+            winesteam
+
+  build:
+    name: Build (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile Swift app
+        # Same flags as the Makefile 'app'/'bundle' targets. This gates the
+        # build so a broken VineportApp.swift can't land unnoticed.
+        run: swiftc -O -parse-as-library -o /tmp/Vineport VineportApp.swift
+      - name: Verify launch scripts parse
+        run: |
+          for f in common.sh launch-*.sh setup.sh build-wine.sh winesteam dismiss-dialogs.sh; do
+            bash -n "$f"
+          done

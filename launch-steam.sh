@@ -1,47 +1,33 @@
 #!/bin/bash
-# launch-steam.sh — Open-source Wine launcher for Windows Steam on Apple Silicon
-# Uses Wine Staging (LGPL), running under Rosetta 2 on macOS.
+# launch-steam.sh — Open-source Wine launcher for Windows Steam on Apple Silicon.
+# Runs Steam under a custom Wine build via Rosetta 2 on macOS.
 # The launcher scripts are MIT-licensed. Steam is proprietary software by Valve.
 
-# ── Paths ──────────────────────────────────────────────────────────────
+set -eo pipefail
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=common.sh
+source "${SCRIPT_DIR}/common.sh"
 
-# Detect if running from inside a .app bundle (Resources/) vs git-clone root
-if [[ "${SCRIPT_DIR}" == *".app/Contents/Resources"* ]]; then
-    WINE_DIR="${HOME}/Library/Application Support/WineSteam/wine"
-else
-    WINE_DIR="${SCRIPT_DIR}/wine"
-fi
-
-WINE_BIN="${WINE_DIR}/bin"
-WINE_LIB="${WINE_DIR}/lib"
-
-DEFAULT_PREFIX="$HOME/Library/Application Support/WineSteam"
-WINEPREFIX="${WINEPREFIX:-${DEFAULT_PREFIX}}"
+vineport_resolve_prefix
+vineport_resolve_wine "${SCRIPT_DIR}"
 
 STEAM_EXE="C:/Program Files (x86)/Steam/steam.exe"
+STEAMAPPS="${WINEPREFIX}/drive_c/Program Files (x86)/Steam/steamapps"
 
 # ── Sanity checks ─────────────────────────────────────────────────────
-if [[ ! -x "${WINE_BIN}/wine" ]]; then
-    echo "ERROR: wine not found at ${WINE_BIN}/wine" >&2
-    echo "       Run the setup script first." >&2
-    exit 1
-fi
+vineport_require_wine
 
 # ── First-run: create prefix and install Steam ────────────────────────
 if [[ ! -d "${WINEPREFIX}/drive_c" ]]; then
     echo "First run — creating Wine prefix at ${WINEPREFIX}..."
     echo "This may take a minute."
-    export WINEPREFIX
-    export WINEDEBUG="-all"
-    export WINEDATADIR="${WINE_DIR}/share/wine"
-    export DYLD_LIBRARY_PATH="${WINE_LIB}"
-    export PATH="${WINE_BIN}:${PATH}"
+    vineport_export_base_env
 
     # Initialize the 64-bit prefix
-    WINEARCH=win64 "${WINE_BIN}/wineboot" --init 2>/dev/null
+    WINEARCH=win64 "${WINE_BIN}/wineboot" --init 2>/dev/null || true
 
-    # Download and run Steam installer if no Steam.exe exists
+    # Download and run the Steam installer if no steam.exe exists yet
     STEAM_PATH="${WINEPREFIX}/drive_c/Program Files (x86)/Steam/steam.exe"
     if [[ ! -f "${STEAM_PATH}" ]]; then
         echo "Downloading Steam installer..."
@@ -49,14 +35,28 @@ if [[ ! -d "${WINEPREFIX}/drive_c" ]]; then
             INSTALLER="$HOME/Downloads/SteamSetup.exe"
         else
             INSTALLER="$(mktemp /tmp/SteamSetup.XXXXXX.exe)"
-            curl -L -o "${INSTALLER}" "https://cdn.cloudflare.steamstatic.com/client/installer/SteamSetup.exe" 2>/dev/null
+            # Remove the temp installer whenever the script exits.
+            trap 'rm -f "${INSTALLER}" 2>/dev/null || true' EXIT
+            if ! curl -fL -o "${INSTALLER}" \
+                 "https://cdn.cloudflare.steamstatic.com/client/installer/SteamSetup.exe"; then
+                echo "ERROR: Failed to download Steam installer. Check your connection and retry." >&2
+                exit 1
+            fi
+        fi
+        if [[ ! -s "${INSTALLER}" ]]; then
+            echo "ERROR: Steam installer is empty (download failed)." >&2
+            exit 1
         fi
         echo "Installing Steam (this takes a few minutes)..."
-        "${WINE_BIN}/wine" "${INSTALLER}" /S 2>/dev/null
+        "${WINE_BIN}/wine" "${INSTALLER}" /S 2>/dev/null || true
+        if [[ ! -f "${STEAM_PATH}" ]]; then
+            echo "ERROR: Steam did not install correctly (steam.exe not found)." >&2
+            exit 1
+        fi
         echo "Steam installed."
     fi
 
-    # Install the webhelper wrapper (injects --no-sandbox --in-process-gpu for Wine compat)
+    # Install the webhelper wrapper (forces software rendering for CEF under Wine)
     CEF_DIR="${WINEPREFIX}/drive_c/Program Files (x86)/Steam/bin/cef/cef.win64"
     if [[ -f "${SCRIPT_DIR}/steamwebhelper_wrapper.exe" ]] && [[ -f "${CEF_DIR}/steamwebhelper.exe" ]]; then
         if [[ ! -f "${CEF_DIR}/steamwebhelper_real.exe" ]]; then
@@ -70,15 +70,14 @@ if [[ ! -d "${WINEPREFIX}/drive_c" ]]; then
     echo ""
 fi
 
-# ── Re-install webhelper wrapper if Steam overwrote it during update ──
+# ── Re-install webhelper wrapper if Steam overwrote it during an update ──
 WRAPPER_SRC="${SCRIPT_DIR}/steamwebhelper_wrapper.exe"
 CEF_DIR="${WINEPREFIX}/drive_c/Program Files (x86)/Steam/bin/cef/cef.win64"
 WRAPPER_DST="${CEF_DIR}/steamwebhelper.exe"
 REAL_DST="${CEF_DIR}/steamwebhelper_real.exe"
 if [[ -f "${WRAPPER_SRC}" ]] && [[ -f "${WRAPPER_DST}" ]]; then
     INSTALLED_SIZE=$(stat -f%z "${WRAPPER_DST}")
-    # Real Steam binary is always >1MB; our wrapper is <1MB.
-    # If the installed file is large, Steam updated and overwrote our wrapper.
+    # The real Steam binary is always >1MB; our wrapper is <1MB.
     if [[ "${INSTALLED_SIZE}" -gt 1048576 ]]; then
         echo "Steam update overwrote webhelper wrapper — re-installing..."
         cp "${WRAPPER_DST}" "${REAL_DST}"
@@ -87,44 +86,39 @@ if [[ -f "${WRAPPER_SRC}" ]] && [[ -f "${WRAPPER_DST}" ]]; then
 fi
 
 # ── Wine environment ──────────────────────────────────────────────────
-export WINEPREFIX
-export WINESERVER="${WINE_BIN}/wineserver"
-export WINEARCH=win64
-export WINEDATADIR="${WINE_DIR}/share/wine"
-export DYLD_LIBRARY_PATH="${WINE_LIB}"
-export PATH="${WINE_BIN}:${PATH}"
+vineport_export_base_env
 
-# ── Performance ────────────────────────────────────────────────────────
-export WINEMSYNC="${WINEMSYNC:-1}"
-export WINEESYNC="${WINEESYNC:-1}"
+# ── Performance / .NET ─────────────────────────────────────────────────
 export DOTNET_EnableWriteXorExecute=0
 
 # ── Steam CEF rendering fix ───────────────────────────────────────────
 # Wine's DXGI/ANGLE doesn't report properly, causing CEF to black-screen.
-# Force CEF to use software rendering (SwiftShader) via these overrides.
-# This only affects Steam's UI — games use their own rendering path.
+# Force CEF to use software rendering (SwiftShader). Only affects Steam's UI.
 export STEAM_DISABLE_GPU_PROCESS=1
 export GALLIUM_DRIVER=llvmpipe
-
-# Force CEF to use software rendering with no sandbox.
-# These are passed to steamwebhelper child processes via environment.
 export STEAM_CEF_COMMAND_LINE="--no-sandbox --in-process-gpu --disable-gpu --disable-gpu-compositing --use-gl=swiftshader --disable-software-rasterizer"
 
-# ── Debug ──────────────────────────────────────────────────────────────
-export WINEDEBUG="${WINEDEBUG:--all}"
+# ── DLL overrides ─────────────────────────────────────────────────────
+# DXVK (d3d11) + vkd3d-proton (d3d12) for Vulkan→MoltenVK→Metal rendering.
+export WINEDLLOVERRIDES="d3d11,d3d10core,d3d12,d3d12core=n,b;${WINEDLLOVERRIDES:-}"
+
+# EOS SDK: use the null anti-cheat client so games that bundle EOS don't crash
+# when their anti-cheat can't initialize under Wine. This only enables offline /
+# singleplayer play — it does not enable online/multiplayer anti-cheat.
+export EOS_USE_ANTICHEATCLIENTNULL=1
 
 # ── Kill stale wineserver (prevents "won't start" after unclean shutdown) ─
-"${WINESERVER}" -k 2>/dev/null && sleep 1 || true
+vineport_kill_wineserver
 
 # ── Launch ─────────────────────────────────────────────────────────────
-echo "=== WineSteam (Open Source) ==="
+echo "=== Vineport (Open Source) ==="
 echo "  Wine     : $(${WINE_BIN}/wine --version 2>/dev/null || echo 'unknown')"
 echo "  Prefix   : ${WINEPREFIX}"
 echo "  WINEMSYNC: ${WINEMSYNC}"
 echo "  WINEDEBUG: ${WINEDEBUG}"
 echo ""
 
-# Auto-dismiss error dialogs if the script exists
+# Auto-dismiss error dialogs if the helper exists
 DISMISS_PID=""
 if [[ -x "${SCRIPT_DIR}/dismiss-dialogs.sh" ]]; then
     "${SCRIPT_DIR}/dismiss-dialogs.sh" &
@@ -133,13 +127,13 @@ fi
 
 # Clean up on signals (user quit / system shutdown)
 cleanup() {
-    [[ -n "$DISMISS_PID" ]] && kill $DISMISS_PID 2>/dev/null
-    "${WINESERVER}" -k 2>/dev/null
+    [[ -n "$DISMISS_PID" ]] && kill "$DISMISS_PID" 2>/dev/null || true
+    vineport_kill_wineserver
 }
 trap cleanup INT TERM HUP
 
-# Launch Steam and wait for it to exit
-# CEF flags: force software rendering (fixes black screen on non-CrossOver Wine)
+# Launch Steam and wait for it to exit.
+# CEF flags force software rendering (fixes black screen on non-CrossOver Wine).
 "${WINE_BIN}/wine" "${STEAM_EXE}" \
     -cef-disable-gpu \
     -cef-disable-gpu-compositing \
@@ -148,9 +142,8 @@ trap cleanup INT TERM HUP
     -no-cef-sandbox \
     -noverifyfiles -norepairfiles "$@" || true
 
-# Wait for all Wine processes to finish (wineserver stays alive while they run)
-"${WINESERVER}" -w || true
+# Wait for all Wine processes to finish (Steam is the foreground process here).
+vineport_wait_wineserver
 
-# Clean up dismiss-dialogs
-[[ -n "$DISMISS_PID" ]] && kill $DISMISS_PID 2>/dev/null
+[[ -n "$DISMISS_PID" ]] && kill "$DISMISS_PID" 2>/dev/null || true
 exit 0
