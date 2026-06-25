@@ -12,13 +12,12 @@
 /share
 
 # ── Build artifacts (build from source with `make`) ──
+# NOTE: don't ignore a root "Vineport" — the FS is case-insensitive, so it would
+# also ignore the `vineport` CLI. The app binary lives in Vineport.app/ (below).
 steamwebhelper_wrapper.exe
-/Vineport
 /Vineport.app/
 /dist/
 *.dylib
-WineSteam.app/Contents/MacOS/WineSteamLauncher
-WineSteam.app/Contents/_CodeSignature/
 
 # ── Kept local, intentionally NOT published ───────────────────────────
 # Anti-cheat circumvention code + anything documenting it.
@@ -35,4 +34,3 @@ proc_emulator.dylib
 .DS_Store
 *.swp
 *.log
-WineSteam.app/Contents/Resources/AppIcon.icns

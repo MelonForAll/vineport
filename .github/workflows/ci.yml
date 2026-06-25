@@ -31,7 +31,7 @@ jobs:
             setup.sh \
             build-wine.sh \
             dismiss-dialogs.sh \
-            winesteam
+            vineport
 
   build:
     name: Build (macOS)
@@ -44,6 +44,6 @@ jobs:
         run: swiftc -O -parse-as-library -o /tmp/Vineport VineportApp.swift
       - name: Verify launch scripts parse
         run: |
-          for f in common.sh launch-*.sh setup.sh build-wine.sh winesteam dismiss-dialogs.sh; do
+          for f in common.sh launch-*.sh setup.sh build-wine.sh vineport dismiss-dialogs.sh; do
             bash -n "$f"
           done

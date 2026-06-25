@@ -71,8 +71,7 @@ bundle: wrapper
 	cp setup.sh "$(BUNDLE_RESOURCES)/"
 	cp dismiss-dialogs.sh "$(BUNDLE_RESOURCES)/"
 	cp steamwebhelper_wrapper.exe "$(BUNDLE_RESOURCES)/"
-	# The CLI lives on disk as `winesteam`; ship it as `vineport`.
-	cp winesteam "$(BUNDLE_RESOURCES)/vineport"
+	cp vineport "$(BUNDLE_RESOURCES)/vineport"
 	chmod +x "$(BUNDLE_RESOURCES)"/*.sh "$(BUNDLE_RESOURCES)/vineport"
 	# Ad-hoc code sign
 	codesign --force --deep -s - "$(BUNDLE)"
