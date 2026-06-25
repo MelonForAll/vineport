@@ -19,7 +19,12 @@ fi
 
 WINE_BIN="${GPTK_APP}/bin/wine64"
 WINESERVER="${GPTK_APP}/bin/wineserver"
-WINEPREFIX="${WINEPREFIX:-$HOME/Library/Application Support/Vineport}"
+SHARED_PREFIX="${WINEPREFIX:-$HOME/Library/Application Support/Vineport}"
+# Use a dedicated GPTK prefix so GPTK's Wine (7.7) never reconfigures the bundled
+# Wine (11.7) prefix — no version churn. The Steam library is symlinked in, so the
+# game's C:\ paths are unchanged.
+vineport_gptk_prefix "${SHARED_PREFIX}" "${WINE_BIN}"
+WINEPREFIX="${GPTK_PREFIX}"
 STEAMAPPS="${WINEPREFIX}/drive_c/Program Files (x86)/Steam/steamapps"
 
 APPID="${1:?Usage: $0 <appid>}"

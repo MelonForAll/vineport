@@ -89,3 +89,35 @@ vineport_kill_wineserver() {
 vineport_wait_wineserver() {
     "${WINESERVER_BIN}" -w 2>/dev/null || true
 }
+
+# Set up (once) and select a dedicated GPTK/D3DMetal Wine prefix in GPTK_PREFIX.
+# GPTK ships Wine 7.7; giving it its own prefix means it never reconfigures the
+# bundled Wine 11.7 prefix (no version churn) and the bundled prefix's DXVK
+# overrides can't leak in. The Steam + Epic game libraries are symlinked in so
+# games are shared (no re-download) and keep the same C:\ paths.
+# Args: $1 = bundled/shared WINEPREFIX, $2 = GPTK wine64 binary. Sets GPTK_PREFIX.
+vineport_gptk_prefix() {
+    local shared="$1" gptk_wine="$2" gptk_bin
+    gptk_bin="$(dirname "$gptk_wine")"
+    GPTK_PREFIX="${shared}-gptk"
+
+    if [[ ! -e "${GPTK_PREFIX}/system.reg" ]]; then
+        echo "Setting up dedicated GPTK prefix (one-time): ${GPTK_PREFIX}"
+        mkdir -p "${GPTK_PREFIX}"
+        WINEPREFIX="${GPTK_PREFIX}" WINEDEBUG=-all "${gptk_wine}" wineboot --init >/dev/null 2>&1 || true
+        WINEPREFIX="${GPTK_PREFIX}" "${gptk_bin}/wineserver" -w 2>/dev/null || true
+    fi
+
+    # Symlink the game libraries from the bundled prefix so games appear on the
+    # same Windows paths and aren't duplicated.
+    local dc="${GPTK_PREFIX}/drive_c"
+    if [[ -d "${shared}/drive_c/Program Files (x86)/Steam" ]]; then
+        mkdir -p "${dc}/Program Files (x86)"
+        [[ -e "${dc}/Program Files (x86)/Steam" ]] || \
+            ln -sfn "${shared}/drive_c/Program Files (x86)/Steam" "${dc}/Program Files (x86)/Steam"
+    fi
+    if [[ -d "${shared}/drive_c/Epic Games" ]]; then
+        [[ -e "${dc}/Epic Games" ]] || \
+            ln -sfn "${shared}/drive_c/Epic Games" "${dc}/Epic Games"
+    fi
+}
