@@ -106,25 +106,29 @@ class GameLibrary: ObservableObject {
         supportDir = home.appendingPathComponent("Library/Application Support/Vineport")
 
         // Find Wine: check project dir first (dev workflow), then support dir (bundle workflow)
+        let binDir = URL(fileURLWithPath: (CommandLine.arguments[0] as NSString).deletingLastPathComponent)
         let possibleProjectDirs = [
             // Next to the binary
-            URL(fileURLWithPath: (CommandLine.arguments[0] as NSString).deletingLastPathComponent),
+            binDir,
+            // Directory containing the .app bundle
+            // (binary is <repo>/Vineport.app/Contents/MacOS/Vineport)
+            binDir.deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent(),
             // Common dev locations
+            home.appendingPathComponent("vineport"),
             home.appendingPathComponent("opensource-wine-steam"),
             URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
         ]
 
+        // First candidate that looks like the git clone (has setup.sh) wins
         var foundProjectDir: URL? = nil
         for dir in possibleProjectDirs {
-            // Check if this dir or its parent has wine/bin/wine
-            for candidate in [dir, dir.deletingLastPathComponent().deletingLastPathComponent()] {
-                if FileManager.default.isExecutableFile(
-                    atPath: candidate.appendingPathComponent("wine/bin/wine").path) {
-                    foundProjectDir = candidate
-                    break
-                }
+            if FileManager.default.fileExists(
+                atPath: dir.appendingPathComponent("setup.sh").path) {
+                foundProjectDir = dir
+                break
             }
-            if foundProjectDir != nil { break }
         }
 
         projectDir = foundProjectDir ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -223,7 +227,13 @@ class GameLibrary: ObservableObject {
         let pipe = Pipe()
         proc.standardOutput = pipe
         proc.standardError = FileHandle.nullDevice
-        try? proc.run()
+        do {
+            try proc.run()
+        } catch {
+            // legendary isn't installed — bail before touching the pipe, or
+            // readDataToEndOfFile() would block forever (no child ever attached).
+            return games
+        }
         // Read BEFORE waitUntilExit to avoid pipe buffer deadlock
         let outData = pipe.fileHandleForReading.readDataToEndOfFile()
         proc.waitUntilExit()
@@ -295,6 +305,21 @@ class GameLibrary: ObservableObject {
 
         let gameURL = URL(fileURLWithPath: game.installDir)
 
+        // Check well-known root-level marker directories first — large games can
+        // exceed the file cap below, so these must be detected regardless of it
+        if let entries = try? fm.contentsOfDirectory(atPath: game.installDir) {
+            for entry in entries {
+                let name = entry.lowercased()
+                if name == "easyanticheat_eos" {
+                    game.antiCheat = .eacEOS
+                } else if name == "easyanticheat" {
+                    if game.antiCheat == .none { game.antiCheat = .eacLegacy }
+                } else if name == "battleye" {
+                    game.antiCheat = .battleye
+                }
+            }
+        }
+
         // Recursively search for anti-cheat files (max depth 4)
         if let enumerator = fm.enumerator(at: gameURL, includingPropertiesForKeys: nil,
                                            options: [.skipsHiddenFiles]) {
@@ -309,7 +334,9 @@ class GameLibrary: ObservableObject {
 
                 let filename = fileURL.lastPathComponent.lowercased()
 
-                if filename.contains("easyanticheat") || filename.contains("eac") {
+                // Bare "eac" substrings (beacon.dll, react.dll, ...) are not EAC —
+                // only match the vendor name or an exact/prefixed "eac" component
+                if filename.contains("easyanticheat") || filename == "eac" || filename.hasPrefix("eac_") {
                     if filename.contains("eos_setup") || filename.contains("_eos") {
                         game.antiCheat = .eacEOS
                     } else if game.antiCheat == .none {
@@ -377,12 +404,15 @@ class ProcessManager: ObservableObject {
         if FileManager.default.fileExists(atPath: "\(cwd)/launch-steam.sh") {
             return cwd
         }
-        // Last resort: look next to the binary
+        // Last resort: walk up from the binary — for an .app bundle the repo is
+        // three levels up (binary -> Contents/MacOS -> Contents -> .app -> repo)
         let binary = CommandLine.arguments[0]
-        let binDir = (binary as NSString).deletingLastPathComponent
-        let parentDir = (binDir as NSString).deletingLastPathComponent
-        if FileManager.default.fileExists(atPath: "\(parentDir)/launch-steam.sh") {
-            return parentDir
+        var dir = (binary as NSString).deletingLastPathComponent
+        for _ in 0..<3 {
+            dir = (dir as NSString).deletingLastPathComponent
+            if FileManager.default.fileExists(atPath: "\(dir)/launch-steam.sh") {
+                return dir
+            }
         }
         return cwd
     }
@@ -454,8 +484,21 @@ class ProcessManager: ObservableObject {
         proc.arguments = [script, "--target-dir", targetDir, "--quiet"]
 
         let pipe = Pipe()
+        let errPipe = Pipe()
         proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
+        proc.standardError = errPipe
+
+        // Capture stderr so the real failure reason (checksum mismatch, extract
+        // error, ...) can be surfaced instead of a generic network message.
+        var errLog = ""
+        errPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            DispatchQueue.main.async {
+                errLog += text
+                if errLog.count > 20000 { errLog = String(errLog.suffix(10000)) }
+            }
+        }
 
         pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
@@ -479,13 +522,29 @@ class ProcessManager: ObservableObject {
         }
 
         proc.terminationHandler = { [weak self] p in
+            // Drain any stderr still in the pipe before composing the message
+            errPipe.fileHandleForReading.readabilityHandler = nil
+            let remaining = errPipe.fileHandleForReading.readDataToEndOfFile()
             DispatchQueue.main.async {
+                if let text = String(data: remaining, encoding: .utf8), !text.isEmpty {
+                    errLog += text
+                }
                 self?.isSettingUp = false
                 if p.terminationStatus == 0 {
                     self?.lastError = nil
                     self?.library.scan()
                 } else {
-                    let msg = "Setup failed (exit \(p.terminationStatus)). Check your connection and try again."
+                    // Show the script's last stderr lines (the real diagnostics)
+                    // rather than unconditionally blaming the network.
+                    let tail = errLog
+                        .split(whereSeparator: { $0 == "\n" || $0 == "\r" })
+                        .map { $0.trimmingCharacters(in: .whitespaces) }
+                        .filter { !$0.isEmpty }
+                        .suffix(3)
+                        .joined(separator: "\n")
+                    let msg = tail.isEmpty
+                        ? "Setup failed (exit \(p.terminationStatus)). Check your connection and try again."
+                        : "Setup failed (exit \(p.terminationStatus)):\n\(tail)"
                     self?.setupProgress = msg
                     self?.lastError = msg
                 }
@@ -594,7 +653,17 @@ class ProcessManager: ObservableObject {
             let pipe = Pipe()
             proc.standardOutput = pipe
             proc.standardError = pipe
-            try? proc.run()
+            do {
+                try proc.run()
+            } catch {
+                // legendary isn't installed — bail before touching the pipe, or
+                // readDataToEndOfFile() would block forever (no child ever attached).
+                DispatchQueue.main.async {
+                    self?.epicLoggedIn = false
+                    self?.epicUsername = ""
+                }
+                return
+            }
             let outData = pipe.fileHandleForReading.readDataToEndOfFile()
             proc.waitUntilExit()
             let output = String(data: outData, encoding: .utf8) ?? ""
@@ -658,10 +727,21 @@ class ProcessManager: ObservableObject {
             proc.standardOutput = pipe
             proc.standardError = pipe
 
-            try? proc.run()
-            proc.waitUntilExit()
+            do {
+                try proc.run()
+            } catch {
+                // legendary isn't installed — bail before touching the pipe, or
+                // readDataToEndOfFile() would block forever (no child ever attached).
+                DispatchQueue.main.async {
+                    self?.epicLoginInProgress = false
+                    self?.epicLoginError = "legendary is not installed: \(error.localizedDescription)"
+                }
+                return
+            }
 
+            // Read BEFORE waitUntilExit to avoid pipe buffer deadlock
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            proc.waitUntilExit()
             let output = String(data: data, encoding: .utf8) ?? ""
 
             DispatchQueue.main.async {
@@ -1100,42 +1180,34 @@ struct AntiCheatView: View {
                 Text("Anti-Cheat Status")
                     .font(.largeTitle.bold())
 
-                GroupBox("Mach Syscall Interception") {
+                GroupBox("What Vineport Ships") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Label("EXC_SYSCALL handler: Proven working", systemImage: "checkmark.circle.fill")
+                        Label("Clean, unmodified upstream Wine (Staging)", systemImage: "checkmark.circle.fill")
                             .foregroundColor(.green)
-                        Label("NT syscall interception: 8/8 tests pass", systemImage: "checkmark.circle.fill")
-                            .foregroundColor(.green)
-                        Label("State modification under Rosetta 2: Working", systemImage: "checkmark.circle.fill")
+                        Label("No anti-cheat circumvention is included", systemImage: "checkmark.circle.fill")
                             .foregroundColor(.green)
                     }
                     .padding(8)
                 }
 
-                GroupBox("Wine Detection Vectors") {
+                GroupBox("EAC / BattlEye Games") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Label("PE headers: Pass", systemImage: "checkmark.circle.fill")
-                            .foregroundColor(.green)
-                        Label("Debug ports: Pass", systemImage: "checkmark.circle.fill")
-                            .foregroundColor(.green)
-                        Label("PEB fields: Pass", systemImage: "checkmark.circle.fill")
-                            .foregroundColor(.green)
-                        Label("Module paths: Pass", systemImage: "checkmark.circle.fill")
-                            .foregroundColor(.green)
-                        Label("Process list: Needs patch (winedevice visible)",
+                        Label("Online play: not supported unless the game ships native Wine/Proton anti-cheat support",
                               systemImage: "exclamationmark.triangle.fill")
                             .foregroundColor(.orange)
-                        Label("Kernel modules: Needs patch (only 3 reported)",
-                              systemImage: "exclamationmark.triangle.fill")
-                            .foregroundColor(.orange)
+                        Label("Offline/singleplayer: use \"Play Offline (No Anti-Cheat)\" on the game card",
+                              systemImage: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                        Label("Detected anti-cheat shows as a shield badge in the library",
+                              systemImage: "shield.lefthalf.filled")
+                            .foregroundColor(.secondary)
                     }
                     .padding(8)
                 }
 
-                GroupBox("How to Run Tests") {
+                GroupBox("Compatibility") {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("make test-build && make test")
-                            .font(.system(.body, design: .monospaced))
+                        Text("Check ProtonDB for game-specific reports — if a game runs on Linux/Proton, it will likely work here.")
                             .textSelection(.enabled)
                     }
                     .padding(8)
@@ -1586,6 +1658,7 @@ struct ContentView: View {
     @State private var sidebarSelection: String? = "all"
     @State private var showRunningView = false
     @State private var searchText = ""
+    @State private var showSteamInstallHint = false
 
     init() {
         let lib = GameLibrary()
@@ -1711,12 +1784,20 @@ struct ContentView: View {
                                 onInstall: { game in
                                     if game.source == .epic {
                                         processManager.epicInstall(appName: game.id)
+                                    } else {
+                                        // Steam installs go through the Steam client
+                                        showSteamInstallHint = true
                                     }
                                 }
                             )
                         }
                     }
                     .searchable(text: $searchText, prompt: "Search games")
+                    .alert("Install through Steam", isPresented: $showSteamInstallHint) {
+                        Button("OK", role: .cancel) { }
+                    } message: {
+                        Text("This game isn't installed yet. Install it through the Steam client, then use \"Rescan Games\" in Settings to pick it up.")
+                    }
                     .safeAreaInset(edge: .bottom) {
                         if processManager.epicInstalling {
                             HStack(spacing: 12) {
