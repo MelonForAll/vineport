@@ -12,7 +12,7 @@ A native macOS launcher that runs Windows games through [Wine](https://www.wineh
 
 Grab the latest **Vineport.zip** from the [Releases](https://github.com/MelonForAll/vineport/releases) page. Unzip it, drag **Vineport.app** to your Applications folder (or anywhere), and double-click. On first launch it downloads Wine (~190 MB) and sets everything up automatically.
 
-> **Note:** Since the app is not notarized, macOS will block it on first open. Right-click the app and select "Open" to bypass Gatekeeper.
+> **Note:** Since the app is not notarized, macOS blocks it on first launch. Double-click it, dismiss the warning, then open **System Settings → Privacy & Security** and click **Open Anyway** (authenticate when prompted). Or clear the quarantine flag from Terminal: `xattr -d com.apple.quarantine /Applications/Vineport.app`. On macOS 14 and earlier, right-click the app and choose **Open** instead.
 
 For DirectX 12 games, also install Apple's Game Porting Toolkit:
 ```bash
