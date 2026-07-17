@@ -10,7 +10,7 @@ A native macOS launcher that runs Windows games through [Wine](https://www.wineh
 
 ## Download
 
-Grab the latest **Vineport.zip** from the [Releases](https://github.com/MelonForAll/vineport/releases) page. Unzip it, drag **Vineport.app** to your Applications folder (or anywhere), and double-click. On first launch it downloads Wine (~190 MB) and sets everything up automatically.
+A packaged **Vineport.zip** will be published on the [Releases](https://github.com/MelonForAll/vineport/releases) page. Until the first release lands, install from source — see the Quick Start below; it's a `git clone` plus two commands. Once you have **Vineport.app**, drag it to your Applications folder (or anywhere) and double-click. On first launch it downloads Wine (~190 MB) and sets everything up automatically.
 
 > **Note:** Since the app is not notarized, macOS blocks it on first launch. Double-click it, dismiss the warning, then open **System Settings → Privacy & Security** and click **Open Anyway** (authenticate when prompted). Or clear the quarantine flag from Terminal: `xattr -d com.apple.quarantine /Applications/Vineport.app`. On macOS 14 and earlier, right-click the app and choose **Open** instead.
 
@@ -28,6 +28,9 @@ cd vineport
 # Download Wine Staging (~190 MB)
 chmod +x setup.sh
 ./setup.sh
+
+# Build the Vineport.app GUI (optional — needs Xcode command line tools)
+make app
 
 # Launch the Steam client
 ./launch-steam.sh
