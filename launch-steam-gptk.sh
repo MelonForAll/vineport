@@ -20,6 +20,10 @@ fi
 WINE_BIN="${GPTK_APP}/bin/wine64"
 WINESERVER="${GPTK_APP}/bin/wineserver"
 SHARED_PREFIX="${WINEPREFIX:-$HOME/Library/Application Support/Vineport}"
+# Drop any inherited bundled-Wine env BEFORE the first GPTK wine run (including
+# the one-time prefix init below): Wine 11.7 dylibs/datadir must not leak into
+# GPTK's Wine 7.7.
+unset DYLD_LIBRARY_PATH WINEDATADIR
 # Use a dedicated GPTK prefix so GPTK's Wine (7.7) never reconfigures the bundled
 # Wine (11.7) prefix — no version churn. The Steam library is symlinked in, so the
 # game's C:\ paths are unchanged.
@@ -75,7 +79,6 @@ fi
 # registry setting can make Wine load DXVK / vkd3d-proton here — those need
 # Vulkan, which GPTK's Wine doesn't provide, so they'd fail. "=b" means builtin.
 export WINEDLLOVERRIDES="d3d9,d3d10,d3d10core,d3d11,d3d12,d3d12core,dxgi=b"
-unset DYLD_LIBRARY_PATH
 export WINEPREFIX
 export WINEARCH=win64
 export WINEDEBUG="${WINEDEBUG:--all}"

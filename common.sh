@@ -16,6 +16,12 @@ vineport_resolve_wine() {
         WINE_DIR="${HOME}/Library/Application Support/Vineport/wine"
     else
         WINE_DIR="${script_dir}/wine"
+        # Fall back to the GUI's Application Support install (older GUI builds
+        # put Wine there even for a git clone).
+        if [[ ! -x "${WINE_DIR}/bin/wine" \
+              && -x "${HOME}/Library/Application Support/Vineport/wine/bin/wine" ]]; then
+            WINE_DIR="${HOME}/Library/Application Support/Vineport/wine"
+        fi
     fi
     WINE_BIN="${WINE_DIR}/bin"
     WINE_LIB="${WINE_DIR}/lib"
@@ -106,6 +112,13 @@ vineport_gptk_prefix() {
         mkdir -p "${GPTK_PREFIX}"
         WINEPREFIX="${GPTK_PREFIX}" WINEDEBUG=-all "${gptk_wine}" wineboot --init >/dev/null 2>&1 || true
         WINEPREFIX="${GPTK_PREFIX}" "${gptk_bin}/wineserver" -w 2>/dev/null || true
+        # Share the user profile (saves/AppData) with the bundled prefix so games
+        # keep their data whichever Wine launches them. First init only: an
+        # existing GPTK prefix may already hold its own user data.
+        if [[ -d "${shared}/drive_c/users" && -d "${GPTK_PREFIX}/drive_c" ]]; then
+            rm -rf "${GPTK_PREFIX}/drive_c/users"
+            ln -sfn "${shared}/drive_c/users" "${GPTK_PREFIX}/drive_c/users"
+        fi
     fi
 
     # Symlink the game libraries from the bundled prefix so games appear on the
