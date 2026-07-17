@@ -463,11 +463,30 @@ class ProcessManager: ObservableObject {
                 let gptkWine = "/Applications/Game Porting Toolkit.app/Contents/Resources/wine/bin/wine64"
                 let useGPTK = FileManager.default.fileExists(atPath: gptkWine)
                 let wineBin = useGPTK ? gptkWine : library.wineDir.appendingPathComponent("bin/wine").path
-                runProcess(path: legendaryPath, arguments: [
-                    "launch", game.id,
-                    "--wine", wineBin,
-                    "--wine-prefix", library.supportDir.path
-                ], gptk: useGPTK)
+                if useGPTK {
+                    // Dedicated GPTK prefix, same rule as launch-steam-gptk.sh:
+                    // GPTK's Wine (7.7) must never reconfigure the bundled Wine
+                    // (11.7) prefix. Prefix init can take a few seconds the first
+                    // time, so do it off the main thread before launching.
+                    let shared = library.supportDir.path
+                    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                        guard let self = self else { return }
+                        let prefix = self.ensureGPTKPrefix(sharedPrefix: shared, gptkWine: gptkWine)
+                        DispatchQueue.main.async {
+                            self.runProcess(path: legendaryPath, arguments: [
+                                "launch", game.id,
+                                "--wine", wineBin,
+                                "--wine-prefix", prefix
+                            ], gptk: true, winePrefix: prefix)
+                        }
+                    }
+                } else {
+                    runProcess(path: legendaryPath, arguments: [
+                        "launch", game.id,
+                        "--wine", wineBin,
+                        "--wine-prefix", library.supportDir.path
+                    ])
+                }
             }
         }
     }
@@ -565,7 +584,27 @@ class ProcessManager: ObservableObject {
         }
     }
 
-    private func runProcess(path: String, arguments: [String], gptk: Bool = false) {
+    // One-time init + game-library symlinks for the dedicated GPTK prefix, via
+    // the same common.sh helper the launch scripts use (single source of truth).
+    // Returns the dedicated prefix path; if the helper fails, GPTK's Wine will
+    // still auto-initialize the prefix on first launch (only the symlinks and
+    // pre-warmed registry are lost).
+    private func ensureGPTKPrefix(sharedPrefix: String, gptkWine: String) -> String {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+        proc.arguments = ["-c",
+            "source \"$1/common.sh\" && vineport_gptk_prefix \"$2\" \"$3\"",
+            "vineport", scriptDir, sharedPrefix, gptkWine]
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+        } catch {}
+        return sharedPrefix + "-gptk"
+    }
+
+    private func runProcess(path: String, arguments: [String], gptk: Bool = false, winePrefix: String? = nil) {
         isRunning = true
 
         let proc = Process()
@@ -573,7 +612,7 @@ class ProcessManager: ObservableObject {
         proc.arguments = arguments
 
         var env = ProcessInfo.processInfo.environment
-        env["WINEPREFIX"] = library.supportDir.path
+        env["WINEPREFIX"] = winePrefix ?? library.supportDir.path
         env["WINEARCH"] = "win64"
         if env["WINEDEBUG"] == nil { env["WINEDEBUG"] = "-all" }
         env["WINEMSYNC"] = "1"

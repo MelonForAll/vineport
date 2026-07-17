@@ -70,6 +70,13 @@ if [[ -x "$GPTK_WINE" && "${VINEPORT_NO_GPTK:-0}" != "1" ]]; then
     unset DYLD_LIBRARY_PATH
     unset WINEDATADIR
     export PATH="$(dirname "$GPTK_WINE"):/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin"
+    # Dedicated GPTK prefix, same as launch-steam-gptk.sh: GPTK's Wine (7.7) must
+    # never reconfigure the bundled Wine (11.7) prefix — no version churn. The
+    # Epic Games library is symlinked in, so C:\ paths are unchanged.
+    vineport_gptk_prefix "${WINEPREFIX}" "${GPTK_WINE}"
+    WINEPREFIX="${GPTK_PREFIX}"
+    export WINEPREFIX
+    export WINESERVER="$(dirname "$GPTK_WINE")/wineserver"
     echo "Rendering via Game Porting Toolkit (D3DMetal)."
 else
     WINE_GAME="${WINE_BIN}/wine"

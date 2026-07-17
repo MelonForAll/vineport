@@ -593,6 +593,16 @@ setup_epic_wine_env() {
         unset DYLD_LIBRARY_PATH
         unset WINEDATADIR
         export PATH="$(dirname "$gptk_wine"):${PATH}"
+        # Dedicated GPTK prefix, same as launch-steam-gptk.sh: GPTK's Wine (7.7)
+        # must never reconfigure the bundled Wine (11.7) prefix. The Epic Games
+        # library is symlinked in, so C:\ paths are unchanged. (Game files still
+        # live under the shared prefix; EPIC_INSTALL_DIR is unaffected.)
+        # shellcheck source=common.sh
+        source "${SCRIPT_DIR}/common.sh"
+        vineport_gptk_prefix "${WINEPREFIX}" "$gptk_wine"
+        WINEPREFIX="${GPTK_PREFIX}"
+        export WINEPREFIX
+        export WINESERVER="$(dirname "$gptk_wine")/wineserver"
         echo -e "  ${DIM}Rendering via Game Porting Toolkit (D3DMetal).${NC}"
     else
         EPIC_WINE="${WINE_BIN}/wine"
