@@ -41,6 +41,11 @@ INSTALL_DIR=$(sed -n 's/.*"installdir"[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST
 GAME_NAME=$(sed -n 's/.*"name"[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST")
 GAME_DIR="${STEAMAPPS}/common/${INSTALL_DIR}"
 
+if [[ ! -d "$GAME_DIR" ]]; then
+    echo "ERROR: Game directory not found: ${GAME_DIR}" >&2
+    exit 1
+fi
+
 # Find the game executable: EAC Settings.json (authoritative) then a heuristic
 # main-exe scan (Unity top-level, Unreal nested, EAC without a Settings.json).
 SETTINGS_JSON=$(find "${GAME_DIR}" -maxdepth 5 -ipath "*/EasyAntiCheat/settings.json" -print -quit 2>/dev/null || true)
@@ -104,9 +109,9 @@ if [[ -x "${SCRIPT_DIR}/dismiss-dialogs.sh" ]]; then
 fi
 
 cleanup() {
-    [[ -n "$DISMISS_PID" ]] && kill $DISMISS_PID 2>/dev/null
-    rm -f "${WORK_DIR}/steam_appid.txt" 2>/dev/null
-    "${WINESERVER}" -k 2>/dev/null
+    [[ -n "$DISMISS_PID" ]] && kill "$DISMISS_PID" 2>/dev/null || true
+    rm -f "${WORK_DIR}/steam_appid.txt" 2>/dev/null || true
+    "${WINESERVER}" -k 2>/dev/null || true
 }
 trap cleanup INT TERM HUP
 
@@ -114,6 +119,6 @@ cd "${WORK_DIR}"
 "${WINE_BIN}" "./${GAME_EXE}" "$@" || true
 
 "${WINESERVER}" -w || true
-[[ -n "$DISMISS_PID" ]] && kill $DISMISS_PID 2>/dev/null
+[[ -n "$DISMISS_PID" ]] && kill "$DISMISS_PID" 2>/dev/null || true
 rm -f "${WORK_DIR}/steam_appid.txt" 2>/dev/null
 exit 0

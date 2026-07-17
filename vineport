@@ -528,6 +528,50 @@ ensure_legendary() {
     fi
 }
 
+# Resolve an Epic game's install directory. Legendary installs into a folder
+# derived from the game's TITLE (e.g. 'rocketleague'), not its app name, so
+# prefer the real install_path recorded in ~/.config/legendary/installed.json
+# (keyed by app name). Fall back to the old '<base>/<app name>' layout, then a
+# case/space-insensitive match among the install dir's subfolders.
+epic_game_dir() {
+    local game_name="$1"
+    local dir=""
+
+    dir=$(VP_APP="$game_name" python3 -c '
+import json, os
+with open(os.path.expanduser("~/.config/legendary/installed.json")) as f:
+    data = json.load(f)
+print(data.get(os.environ["VP_APP"], {}).get("install_path", ""))
+' 2>/dev/null) || dir=""
+    if [[ -n "$dir" && -d "$dir" ]]; then
+        echo "$dir"
+        return 0
+    fi
+
+    # Legacy app-name layout
+    if [[ -d "${EPIC_INSTALL_DIR}/${game_name}" ]]; then
+        echo "${EPIC_INSTALL_DIR}/${game_name}"
+        return 0
+    fi
+
+    # Title-derived folder (compare ignoring case and non-alphanumerics)
+    local want cand base
+    want=$(echo "$game_name" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]')
+    if [[ -n "$want" ]]; then
+        for cand in "${EPIC_INSTALL_DIR}"/*/; do
+            [[ -d "$cand" ]] || continue
+            base=$(basename "$cand" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]')
+            if [[ "$base" == "$want" ]]; then
+                echo "${cand%/}"
+                return 0
+            fi
+        done
+    fi
+
+    # Nothing found — return the old pattern so callers behave as before
+    echo "${EPIC_INSTALL_DIR}/${game_name}"
+}
+
 # Set up Wine + renderer environment for Epic game launches.
 # Sets EPIC_WINE (the wine binary legendary should use) and EPIC_USING_GPTK.
 # Prefers Apple's Game Porting Toolkit (D3DMetal) when installed — reliable for
@@ -624,7 +668,8 @@ epic_launch() {
 
     # If the game bundles Easy Anti-Cheat, run with the EOS null client so it
     # launches for offline/singleplayer play. (Online anti-cheat won't connect.)
-    local gamedir="${WINEPREFIX}/drive_c/Epic Games/${game_name}"
+    local gamedir
+    gamedir=$(epic_game_dir "$game_name")
     if find "$gamedir" -maxdepth 4 -iname "*EasyAntiCheat*" -print -quit 2>/dev/null | grep -q .; then
         export EOS_USE_ANTICHEATCLIENTNULL=1
         echo -e "  ${DIM}Anti-cheat detected — launching offline (EOS null client).${NC}"
@@ -648,7 +693,8 @@ epic_info() {
     $LEGENDARY_CMD info "$game_name" 2>/dev/null
 
     # Check for EAC in the installed game
-    local game_dir="${EPIC_INSTALL_DIR}/${game_name}"
+    local game_dir
+    game_dir=$(epic_game_dir "$game_name")
     if [[ -d "$game_dir" ]]; then
         echo ""
         echo -e "  ${BOLD}Anti-Cheat:${NC}"

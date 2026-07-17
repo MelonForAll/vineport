@@ -137,17 +137,31 @@ clone_wine() {
         info "Cloning Wine source (tag: ${WINE_VERSION})..."
         git clone --depth=1 --branch "${WINE_VERSION}" \
             https://gitlab.winehq.org/wine/wine.git "${WINE_SRC_DIR}" \
-            || git clone https://gitlab.winehq.org/wine/wine.git "${WINE_SRC_DIR}"
+            || {
+                # Fallback full clone lands on the default branch — pin it to the tag.
+                git clone https://gitlab.winehq.org/wine/wine.git "${WINE_SRC_DIR}"
+                git -C "${WINE_SRC_DIR}" checkout "${WINE_VERSION}" 2>/dev/null \
+                    || git -C "${WINE_SRC_DIR}" checkout "tags/${WINE_VERSION}" 2>/dev/null \
+                    || die "Could not check out ${WINE_VERSION}. Building the wrong Wine version would silently break compatibility."
+            }
     fi
 
     if [[ $USE_STAGING -eq 1 ]]; then
+        # wine-staging patchsets are version-specific: wine tag "wine-X.Y" pairs
+        # with staging tag "vX.Y". A mismatched patchset fails to apply.
+        local staging_tag="v${WINE_VERSION#wine-}"
         if [[ -d "${STAGING_SRC_DIR}/.git" ]]; then
             info "Wine-staging source already cloned."
+            git -C "${STAGING_SRC_DIR}" fetch --depth=1 origin tag "${staging_tag}" 2>/dev/null || true
+            git -C "${STAGING_SRC_DIR}" checkout "${staging_tag}" 2>/dev/null \
+                || die "Could not check out wine-staging ${staging_tag} to match ${WINE_VERSION}. Use --no-staging to build without staging patches."
         else
-            info "Cloning wine-staging..."
-            git clone --depth=1 \
+            info "Cloning wine-staging (tag: ${staging_tag})..."
+            git clone --depth=1 --branch "${staging_tag}" \
                 https://gitlab.winehq.org/wine/wine-staging.git "${STAGING_SRC_DIR}" \
-                || git clone https://github.com/wine-staging/wine-staging.git "${STAGING_SRC_DIR}"
+                || git clone --depth=1 --branch "${staging_tag}" \
+                    https://github.com/wine-staging/wine-staging.git "${STAGING_SRC_DIR}" \
+                || die "Could not clone wine-staging ${staging_tag} to match ${WINE_VERSION}. Use --no-staging to build without staging patches."
         fi
     fi
 }

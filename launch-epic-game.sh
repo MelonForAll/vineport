@@ -59,6 +59,8 @@ EAC_EXE=$(find "${WORK_DIR}" -maxdepth 1 -name "*_EAC.exe" -print -quit 2>/dev/n
 
 # ── Wine selection + environment ─────────────────────────────────────
 vineport_export_base_env
+# Resolve legendary from the current PATH before the GPTK branch replaces it.
+LEG_PATH="$(command -v legendary 2>/dev/null || true)"
 GPTK_WINE="/Applications/Game Porting Toolkit.app/Contents/Resources/wine/bin/wine64"
 if [[ -x "$GPTK_WINE" && "${VINEPORT_NO_GPTK:-0}" != "1" ]]; then
     # Render via GPTK/D3DMetal: force builtin DirectX DLLs and drop the bundled
@@ -67,7 +69,7 @@ if [[ -x "$GPTK_WINE" && "${VINEPORT_NO_GPTK:-0}" != "1" ]]; then
     export WINEDLLOVERRIDES="d3d9,d3d10,d3d10core,d3d11,d3d12,d3d12core,dxgi=b"
     unset DYLD_LIBRARY_PATH
     unset WINEDATADIR
-    export PATH="$(dirname "$GPTK_WINE"):/usr/bin:/bin"
+    export PATH="$(dirname "$GPTK_WINE"):/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin"
     echo "Rendering via Game Porting Toolkit (D3DMetal)."
 else
     WINE_GAME="${WINE_BIN}/wine"
@@ -93,7 +95,7 @@ if [[ $NO_EAC -eq 1 ]]; then
 
     # Locate legendary to fetch Epic auth tokens (some games need them offline).
     LEG_CMD=""
-    for _leg in legendary "$HOME/.local/bin/legendary" \
+    for _leg in ${LEG_PATH:+"$LEG_PATH"} legendary "$HOME/.local/bin/legendary" \
                 /Library/Frameworks/Python.framework/Versions/*/bin/legendary \
                 "$HOME"/Library/Python/*/bin/legendary; do
         if command -v "$_leg" >/dev/null 2>&1 || [[ -x "$_leg" ]]; then

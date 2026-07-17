@@ -30,22 +30,34 @@ if [[ ! -d "${WINEPREFIX}/drive_c" ]]; then
     # Download and run the Steam installer if no steam.exe exists yet
     STEAM_PATH="${WINEPREFIX}/drive_c/Program Files (x86)/Steam/steam.exe"
     if [[ ! -f "${STEAM_PATH}" ]]; then
+        # A valid installer is a Windows PE binary ('MZ' magic) larger than 1MB.
+        installer_ok() {
+            [[ "$(head -c2 "$1" 2>/dev/null)" == "MZ" ]] \
+                && [[ "$(stat -f%z "$1" 2>/dev/null || echo 0)" -gt 1048576 ]]
+        }
         echo "Downloading Steam installer..."
+        INSTALLER=""
         if [[ -f "$HOME/Downloads/SteamSetup.exe" ]]; then
-            INSTALLER="$HOME/Downloads/SteamSetup.exe"
-        else
-            INSTALLER="$(mktemp /tmp/SteamSetup.XXXXXX.exe)"
-            # Remove the temp installer whenever the script exits.
-            trap 'rm -f "${INSTALLER}" 2>/dev/null || true' EXIT
+            if installer_ok "$HOME/Downloads/SteamSetup.exe"; then
+                INSTALLER="$HOME/Downloads/SteamSetup.exe"
+            else
+                echo "WARNING: ~/Downloads/SteamSetup.exe looks corrupt or incomplete — ignoring it and downloading a fresh copy." >&2
+            fi
+        fi
+        if [[ -z "${INSTALLER}" ]]; then
+            TMP_INSTALLER="$(mktemp /tmp/SteamSetup.XXXXXX)"
+            # Remove the temp installer whenever the script exits (never a ~/Downloads copy).
+            trap 'rm -f "${TMP_INSTALLER}" 2>/dev/null || true' EXIT
+            INSTALLER="${TMP_INSTALLER}"
             if ! curl -fL -o "${INSTALLER}" \
                  "https://cdn.cloudflare.steamstatic.com/client/installer/SteamSetup.exe"; then
                 echo "ERROR: Failed to download Steam installer. Check your connection and retry." >&2
                 exit 1
             fi
-        fi
-        if [[ ! -s "${INSTALLER}" ]]; then
-            echo "ERROR: Steam installer is empty (download failed)." >&2
-            exit 1
+            if ! installer_ok "${INSTALLER}"; then
+                echo "ERROR: Downloaded Steam installer is invalid (not a Windows executable or too small)." >&2
+                exit 1
+            fi
         fi
         echo "Installing Steam (this takes a few minutes)..."
         "${WINE_BIN}/wine" "${INSTALLER}" /S 2>/dev/null || true
@@ -112,7 +124,7 @@ vineport_kill_wineserver
 
 # ── Launch ─────────────────────────────────────────────────────────────
 echo "=== Vineport (Open Source) ==="
-echo "  Wine     : $(${WINE_BIN}/wine --version 2>/dev/null || echo 'unknown')"
+echo "  Wine     : $("${WINE_BIN}/wine" --version 2>/dev/null || echo 'unknown')"
 echo "  Prefix   : ${WINEPREFIX}"
 echo "  WINEMSYNC: ${WINEMSYNC}"
 echo "  WINEDEBUG: ${WINEDEBUG}"
