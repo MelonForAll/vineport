@@ -55,37 +55,51 @@ struct Game: Identifiable, Hashable {
 // Find the full path to legendary, since .app bundles have a minimal PATH
 class LegendaryLocator {
     static let shared = LegendaryLocator()
-    lazy var path: String = {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let candidates = [
-            "/Library/Frameworks/Python.framework/Versions/3.9/bin/legendary",
-            "/Library/Frameworks/Python.framework/Versions/3.11/bin/legendary",
-            "/Library/Frameworks/Python.framework/Versions/3.12/bin/legendary",
-            "/Library/Frameworks/Python.framework/Versions/3.13/bin/legendary",
+    // Resolved eagerly in init: `lazy var` is not thread-safe, and the first
+    // accesses race in from two background queues (library scan + login check).
+    let path: String
+    init() {
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser.path
+        var candidates: [String] = []
+        // pip installs land in a Python-version-suffixed bin dir — enumerate
+        // the versions actually present instead of hardcoding a list that rots.
+        for base in ["/Library/Frameworks/Python.framework/Versions",
+                     "\(home)/Library/Python"] {
+            for v in ((try? fm.contentsOfDirectory(atPath: base)) ?? []).sorted().reversed() {
+                candidates.append("\(base)/\(v)/bin/legendary")
+            }
+        }
+        candidates.append(contentsOf: [
             "/usr/local/bin/legendary",
             "/opt/homebrew/bin/legendary",
             "\(home)/.local/bin/legendary",
-            "\(home)/Library/Python/3.9/bin/legendary",
-            "\(home)/Library/Python/3.11/bin/legendary",
-            "\(home)/Library/Python/3.12/bin/legendary",
-        ]
-        for p in candidates {
-            if FileManager.default.isExecutableFile(atPath: p) { return p }
+        ])
+        if let found = candidates.first(where: { fm.isExecutableFile(atPath: $0) }) {
+            path = found
+            return
         }
-        // Last resort: try shell
+        // Last resort: try a login shell
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
         proc.arguments = ["-l", "-c", "which legendary"]
         let pipe = Pipe()
         proc.standardOutput = pipe
         proc.standardError = FileHandle.nullDevice
-        try? proc.run()
-        proc.waitUntilExit()
+        do {
+            try proc.run()
+        } catch {
+            // Bail before touching the pipe — reading with no child attached
+            // blocks forever.
+            path = "/usr/local/bin/legendary"
+            return
+        }
+        // Read BEFORE waitUntilExit to avoid pipe buffer deadlock
         let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !out.isEmpty && FileManager.default.isExecutableFile(atPath: out) { return out }
-        return "/usr/local/bin/legendary"
-    }()
+        proc.waitUntilExit()
+        path = (!out.isEmpty && fm.isExecutableFile(atPath: out)) ? out : "/usr/local/bin/legendary"
+    }
 }
 
 var legendaryPath: String { LegendaryLocator.shared.path }
@@ -96,7 +110,6 @@ class GameLibrary: ObservableObject {
     @Published var lastError: String?
 
     let supportDir: URL
-    let wineDir: URL
     let steamAppsDir: URL
     let epicDir: URL
     let projectDir: URL  // git-clone dev directory
@@ -133,18 +146,20 @@ class GameLibrary: ObservableObject {
 
         projectDir = foundProjectDir ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
 
-        // Wine dir: prefer project dir, fall back to support dir
-        if let found = foundProjectDir,
-           FileManager.default.isExecutableFile(
-            atPath: found.appendingPathComponent("wine/bin/wine").path) {
-            wineDir = found.appendingPathComponent("wine")
-        } else {
-            wineDir = supportDir.appendingPathComponent("wine")
-        }
-
         steamAppsDir = supportDir
             .appendingPathComponent("drive_c/Program Files (x86)/Steam/steamapps")
         epicDir = supportDir.appendingPathComponent("drive_c/Epic Games")
+    }
+
+    // Wine dir: prefer the project checkout, fall back to Application Support.
+    // Computed (not stored) so it stays correct after setup installs Wine.
+    var wineDir: URL {
+        let repoWine = projectDir.appendingPathComponent("wine")
+        if FileManager.default.isExecutableFile(
+            atPath: repoWine.appendingPathComponent("bin/wine").path) {
+            return repoWine
+        }
+        return supportDir.appendingPathComponent("wine")
     }
 
     var wineExists: Bool {
@@ -153,6 +168,9 @@ class GameLibrary: ObservableObject {
     }
 
     func scan() {
+        // No overlapping scans: they finish out of order, so a stale result
+        // could overwrite a fresh one and clear the spinner early.
+        guard !isScanning else { return }
         isScanning = true
 
         DispatchQueue.global(qos: .userInitiated).async { [self] in
@@ -429,6 +447,7 @@ class ProcessManager: ObservableObject {
     }
 
     func launchGame(_ game: Game, mode: LaunchMode = .normal) {
+        guard !isRunning else { return }
         currentGame = game
         outputLog = "Launching \(game.name) [\(mode.rawValue)]...\n"
 
@@ -468,6 +487,10 @@ class ProcessManager: ObservableObject {
                     // GPTK's Wine (7.7) must never reconfigure the bundled Wine
                     // (11.7) prefix. Prefix init can take a few seconds the first
                     // time, so do it off the main thread before launching.
+                    // Mark running now so the UI shows progress and a second
+                    // click can't start a duplicate launch during the prep.
+                    isRunning = true
+                    outputLog += "Preparing GPTK prefix...\n"
                     let shared = library.supportDir.path
                     DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                         guard let self = self else { return }
@@ -496,11 +519,20 @@ class ProcessManager: ObservableObject {
         setupProgress = "Downloading Wine..."
 
         let script = "\(scriptDir)/setup.sh"
-        let targetDir = library.supportDir.appendingPathComponent("wine").path
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/bin/bash")
-        proc.arguments = [script, "--target-dir", targetDir, "--quiet"]
+        if scriptDir.contains(".app/Contents/Resources") {
+            // Bundle layout: Wine lives in Application Support (matches
+            // vineport_resolve_wine in common.sh).
+            let targetDir = library.supportDir.appendingPathComponent("wine").path
+            proc.arguments = [script, "--target-dir", targetDir, "--quiet"]
+        } else {
+            // Git-clone layout: install to <repo>/wine (setup.sh's default,
+            // with the bin/lib/share symlinks) — the launch scripts and CLI
+            // look there first in this layout.
+            proc.arguments = [script, "--quiet"]
+        }
 
         let pipe = Pipe()
         let errPipe = Pipe()
@@ -541,7 +573,9 @@ class ProcessManager: ObservableObject {
         }
 
         proc.terminationHandler = { [weak self] p in
-            // Drain any stderr still in the pipe before composing the message
+            // Stop both readers (a never-cleared readabilityHandler busy-fires
+            // forever after EOF, pinning a core), then drain remaining stderr.
+            pipe.fileHandleForReading.readabilityHandler = nil
             errPipe.fileHandleForReading.readabilityHandler = nil
             let remaining = errPipe.fileHandleForReading.readDataToEndOfFile()
             DispatchQueue.main.async {
@@ -575,6 +609,8 @@ class ProcessManager: ObservableObject {
         } catch {
             // run() threw — the termination handler will never fire, so clear the
             // spinner here and surface the error (otherwise setup hangs forever).
+            pipe.fileHandleForReading.readabilityHandler = nil
+            errPipe.fileHandleForReading.readabilityHandler = nil
             DispatchQueue.main.async { [weak self] in
                 self?.isSettingUp = false
                 let msg = "Couldn't start setup: \(error.localizedDescription)"
@@ -654,7 +690,16 @@ class ProcessManager: ObservableObject {
         proc.terminationHandler = { [weak self] p in
             outPipe.fileHandleForReading.readabilityHandler = nil
             errPipe.fileHandleForReading.readabilityHandler = nil
+            // Drain what the handlers hadn't consumed — with fast-failing
+            // children the final lines are usually the actual error.
+            let outTail = outPipe.fileHandleForReading.readDataToEndOfFile()
+            let errTail = errPipe.fileHandleForReading.readDataToEndOfFile()
             DispatchQueue.main.async {
+                for tail in [outTail, errTail] {
+                    if let text = String(data: tail, encoding: .utf8), !text.isEmpty {
+                        self?.outputLog += text
+                    }
+                }
                 self?.outputLog += "\n[Process exited with code \(p.terminationStatus)]\n"
                 self?.isRunning = false
                 self?.currentGame = nil
@@ -665,6 +710,8 @@ class ProcessManager: ObservableObject {
             try proc.run()
             process = proc
         } catch {
+            outPipe.fileHandleForReading.readabilityHandler = nil
+            errPipe.fileHandleForReading.readabilityHandler = nil
             isRunning = false
             outputLog = "Failed to launch: \(error.localizedDescription)"
         }
@@ -672,6 +719,27 @@ class ProcessManager: ObservableObject {
 
     func stop() {
         process?.terminate()
+        // terminate() only reaches the direct child (bash/legendary); the wine
+        // processes are grandchildren, and the launch scripts' cleanup traps
+        // don't run until wine exits on its own. Shut the wineservers down
+        // directly so Stop actually stops the game.
+        let gptkServer = "/Applications/Game Porting Toolkit.app/Contents/Resources/wine/bin/wineserver"
+        let shared = library.supportDir.path
+        for (server, prefix) in [
+            (library.wineDir.appendingPathComponent("bin/wineserver").path, shared),
+            (gptkServer, shared + "-gptk"),
+        ] {
+            guard FileManager.default.isExecutableFile(atPath: server) else { continue }
+            let kill = Process()
+            kill.executableURL = URL(fileURLWithPath: server)
+            kill.arguments = ["-k"]
+            var env = ProcessInfo.processInfo.environment
+            env["WINEPREFIX"] = prefix
+            kill.environment = env
+            kill.standardOutput = FileHandle.nullDevice
+            kill.standardError = FileHandle.nullDevice
+            try? kill.run()
+        }
     }
 
     // MARK: - Epic Games via Legendary
