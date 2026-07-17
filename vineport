@@ -28,6 +28,12 @@ if [[ "${SCRIPT_DIR}" == *".app/Contents/Resources"* ]]; then
     WINE_DIR="${SUPPORT_DIR}/wine"
 else
     WINE_DIR="${SCRIPT_DIR}/wine"
+    # Fall back to the GUI's Application Support install (older GUI builds put
+    # Wine there even for a git clone).
+    if [[ ! -x "${WINE_DIR}/bin/wine" \
+          && -x "${HOME}/Library/Application Support/Vineport/wine/bin/wine" ]]; then
+        WINE_DIR="${HOME}/Library/Application Support/Vineport/wine"
+    fi
 fi
 
 WINE_BIN="${WINE_DIR}/bin"
@@ -38,13 +44,18 @@ PROFILES_DIR="${HOME}/.config/vineport"
 PROFILES_FILE="${PROFILES_DIR}/profiles.json"
 
 # ── Colors ────────────────────────────────────────────────────────────
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-DIM='\033[2m'
-NC='\033[0m'
+# Only colorize when stdout is a terminal — piped/redirected output stays clean.
+if [[ -t 1 ]]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[0;33m'
+    CYAN='\033[0;36m'
+    BOLD='\033[1m'
+    DIM='\033[2m'
+    NC='\033[0m'
+else
+    RED='' GREEN='' YELLOW='' CYAN='' BOLD='' DIM='' NC=''
+fi
 
 # ── VDF Parser ────────────────────────────────────────────────────────
 # Extracts a top-level key from a VDF/ACF file
@@ -292,7 +303,15 @@ show_info() {
     echo -e "  Install dir: ${STEAMAPPS}/common/${installdir}"
 
     if [[ -n "$size" ]] && [[ "$size" -gt 0 ]]; then
-        echo -e "  Size on disk: $(( size / 1073741824 )) GB"
+        local size_fmt
+        if [[ "$size" -gt 1073741824 ]]; then
+            size_fmt="$(( size / 1073741824 )) GB"
+        elif [[ "$size" -gt 1048576 ]]; then
+            size_fmt="$(( size / 1048576 )) MB"
+        else
+            size_fmt="$(( size / 1024 )) KB"
+        fi
+        echo -e "  Size on disk: ${size_fmt}"
     fi
 
     # Check for known compatibility issues
@@ -490,12 +509,13 @@ EPIC_INSTALL_DIR="${WINEPREFIX}/drive_c/Epic Games"
 find_legendary() {
     if [[ -n "$LEGENDARY_CMD" ]]; then return 0; fi
 
-    # Check common locations
+    # Check common locations. Globs cover whatever Python version pip used —
+    # hardcoded version lists rot (3.13/3.14 installs were silently missed).
     for cmd in legendary legendary-gl "$HOME/.local/bin/legendary" \
-               "$HOME/Library/Python/3.9/bin/legendary" \
-               "$HOME/Library/Python/3.11/bin/legendary" \
-               "$HOME/Library/Python/3.12/bin/legendary"; do
-        if command -v "$cmd" &>/dev/null; then
+               "$HOME"/Library/Python/*/bin/legendary \
+               /Library/Frameworks/Python.framework/Versions/*/bin/legendary \
+               /opt/homebrew/bin/legendary /usr/local/bin/legendary; do
+        if command -v "$cmd" &>/dev/null || [[ -x "$cmd" ]]; then
             LEGENDARY_CMD="$cmd"
             return 0
         fi
@@ -515,15 +535,23 @@ ensure_legendary() {
 
     echo -e "${YELLOW}Legendary (Epic Games CLI) not found.${NC}"
     echo ""
-    echo "Installing via pip..."
-    pip3 install legendary-gl 2>&1 | tail -3
+    # pipx when available; otherwise pip --user. A bare `pip3 install` fails
+    # outright on Homebrew Python (PEP 668 externally-managed environment).
+    if command -v pipx &>/dev/null; then
+        echo "Installing via pipx..."
+        pipx install legendary-gl 2>&1 | tail -3 || true
+    else
+        echo "Installing via pip..."
+        pip3 install --user legendary-gl 2>&1 | tail -3 || true
+    fi
 
     if find_legendary; then
         echo -e "${GREEN}Legendary installed successfully.${NC}"
         return 0
     else
         echo -e "${RED}Failed to install Legendary.${NC}" >&2
-        echo "Try manually: pip3 install legendary-gl" >&2
+        echo "Try manually: pip3 install --user legendary-gl" >&2
+        echo "  (or on Homebrew Python: brew install pipx && pipx install legendary-gl)" >&2
         return 1
     fi
 }
@@ -624,7 +652,7 @@ epic_list_games() {
     ensure_legendary || return 1
     echo -e "${BOLD}Epic Games Library${NC}"
     echo ""
-    $LEGENDARY_CMD list 2>/dev/null | head -100
+    $LEGENDARY_CMD list 2>/dev/null
 }
 
 epic_install() {
@@ -700,7 +728,15 @@ epic_info() {
 
     echo -e "${BOLD}Epic Game Info: ${game_name}${NC}"
     echo ""
-    $LEGENDARY_CMD info "$game_name" 2>/dev/null
+    # legendary exits 0 even for unknown games — detect by output instead.
+    local info_out
+    info_out=$($LEGENDARY_CMD info "$game_name" 2>/dev/null || true)
+    if [[ -z "$info_out" || "$info_out" == *"No game information available"* ]]; then
+        echo -e "${RED}No Epic game named '${game_name}' in your library.${NC}" >&2
+        echo "  List available games with: vineport epic games" >&2
+        return 1
+    fi
+    printf '%s\n' "$info_out"
 
     # Check for EAC in the installed game
     local game_dir
