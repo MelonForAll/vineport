@@ -144,6 +144,16 @@ cleanup() {
 }
 trap cleanup INT TERM HUP
 
+# Skip file verification only once the client is fully installed. On a fresh
+# stub install the bootstrapper's verify step IS what downloads the client
+# (steamui.dll et al.) — skipping it there aborts with
+# "Fatal Error: Failed to load steamui.dll".
+VERIFY_ARGS=(-noverifyfiles -norepairfiles)
+if [[ ! -f "${WINEPREFIX}/drive_c/Program Files (x86)/Steam/steamui.dll" ]]; then
+    VERIFY_ARGS=()
+    echo "First launch — Steam will download and verify its client files (this takes a few minutes)."
+fi
+
 # Launch Steam and wait for it to exit.
 # CEF flags force software rendering (fixes black screen on non-CrossOver Wine).
 "${WINE_BIN}/wine" "${STEAM_EXE}" \
@@ -152,7 +162,7 @@ trap cleanup INT TERM HUP
     -cef-in-process-gpu \
     -cef-disable-sandbox \
     -no-cef-sandbox \
-    -noverifyfiles -norepairfiles "$@" || true
+    ${VERIFY_ARGS[@]+"${VERIFY_ARGS[@]}"} "$@" || true
 
 # Wait for all Wine processes to finish (Steam is the foreground process here).
 vineport_wait_wineserver
