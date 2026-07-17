@@ -10,7 +10,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WINE_VERSION="11.7"
-WINE_URL="https://github.com/Gcenx/macOS_Wine_builds/releases/download/wine-staging-${WINE_VERSION}/wine-staging-${WINE_VERSION}-osx64.tar.xz"
+# Upstream tags releases as plain "11.7" (no "wine-staging-" prefix)
+WINE_URL="https://github.com/Gcenx/macOS_Wine_builds/releases/download/${WINE_VERSION}/wine-staging-${WINE_VERSION}-osx64.tar.xz"
 WINE_SHA256="fd0b9e54c7c17d972d922b686301c37fe4f3e9986f01f49fdff858118c045d94"
 
 # Parse arguments
@@ -28,8 +29,19 @@ WINE_DIR="${TARGET_DIR:-${SCRIPT_DIR}/wine}"
 CREATE_SYMLINKS=1
 [[ -n "${TARGET_DIR}" ]] && CREATE_SYMLINKS=0
 
+# Temp files cleaned up on exit. TMP_TARBALL is only ever set for the
+# fresh-download path, never for a ~/Downloads-sourced tarball.
+TMP_TARBALL=""
+EXTRACT_DIR=""
+trap 'rm -f "${TMP_TARBALL:-}"; rm -rf "${EXTRACT_DIR:-}"' EXIT
+
 log() { [[ $QUIET -eq 0 ]] && echo "$@" || true; }
 progress() { echo "PROGRESS:$1"; }
+
+# Succeeds iff FILE matches the pinned Wine tarball checksum.
+verify_checksum() {
+    [[ "$(shasum -a 256 "$1" | awk '{print $1}')" == "${WINE_SHA256}" ]]
+}
 
 log "=== Vineport Setup ==="
 log ""
@@ -58,23 +70,35 @@ else
     progress "downloading"
     log "Downloading Wine Staging ${WINE_VERSION}..."
 
-    if [[ -f "$HOME/Downloads/wine-staging-${WINE_VERSION}-osx64.tar.xz" ]]; then
-        TARBALL="$HOME/Downloads/wine-staging-${WINE_VERSION}-osx64.tar.xz"
+    # Reuse a tarball from ~/Downloads only if it passes the checksum; a stale
+    # or partial file there is ignored (never deleted) and downloaded fresh.
+    CACHED_TARBALL="$HOME/Downloads/wine-staging-${WINE_VERSION}-osx64.tar.xz"
+    if [[ -f "${CACHED_TARBALL}" ]] && verify_checksum "${CACHED_TARBALL}"; then
+        TARBALL="${CACHED_TARBALL}"
         log "  (Using existing download from ~/Downloads)"
     else
-        TARBALL="$(mktemp /tmp/wine-staging-XXXXXX.tar.xz)"
-        curl -L -o "${TARBALL}" "${WINE_URL}"
-    fi
+        if [[ -f "${CACHED_TARBALL}" ]]; then
+            echo "WARNING: Ignoring ${CACHED_TARBALL}: checksum mismatch (stale or partial download); downloading fresh." >&2
+        fi
+        # No .tar.xz suffix: BSD mktemp only randomizes trailing X's, and tar
+        # autodetects xz without the extension.
+        TMP_TARBALL="$(mktemp /tmp/wine-staging-XXXXXX)"
+        TARBALL="${TMP_TARBALL}"
+        if ! curl -fL -o "${TARBALL}" "${WINE_URL}"; then
+            echo "ERROR: Download failed: ${WINE_URL}" >&2
+            exit 1
+        fi
 
-    progress "verifying"
-    log "Verifying checksum..."
-    ACTUAL_SHA256="$(shasum -a 256 "${TARBALL}" | awk '{print $1}')"
-    if [[ "${ACTUAL_SHA256}" != "${WINE_SHA256}" ]]; then
-        echo "ERROR: Checksum mismatch!" >&2
-        echo "  Expected: ${WINE_SHA256}" >&2
-        echo "  Got:      ${ACTUAL_SHA256}" >&2
-        echo "  The download may be corrupted or tampered with." >&2
-        exit 1
+        progress "verifying"
+        log "Verifying checksum..."
+        ACTUAL_SHA256="$(shasum -a 256 "${TARBALL}" | awk '{print $1}')"
+        if [[ "${ACTUAL_SHA256}" != "${WINE_SHA256}" ]]; then
+            echo "ERROR: Checksum mismatch!" >&2
+            echo "  Expected: ${WINE_SHA256}" >&2
+            echo "  Got:      ${ACTUAL_SHA256}" >&2
+            echo "  The download may be corrupted or tampered with." >&2
+            exit 1
+        fi
     fi
 
     progress "extracting"
@@ -90,6 +114,16 @@ else
     fi
 
     WINE_RESOURCES="${WINE_APP}/Contents/Resources/wine"
+
+    # Only replace ${WINE_DIR} if it is absent, empty, or a (possibly partial)
+    # Wine tree — never delete a target dir holding unrelated files.
+    if [[ -e "${WINE_DIR}" && -n "$(ls -A "${WINE_DIR}" 2>/dev/null || echo x)" ]] \
+        && [[ ! -x "${WINE_DIR}/bin/wine" ]] \
+        && ! [[ -d "${WINE_DIR}/bin" && -d "${WINE_DIR}/lib" && -d "${WINE_DIR}/share" ]]; then
+        echo "ERROR: ${WINE_DIR} contains unrelated files and will not be deleted." >&2
+        echo "  Choose an empty or nonexistent --target-dir, or move its contents aside." >&2
+        exit 1
+    fi
 
     # Stage into a temp dir on the same filesystem, then move into place in one
     # atomic rename. An interrupted copy never leaves a half-installed (and
@@ -107,13 +141,22 @@ else
 
     # Create convenience symlinks (only for git-clone layout)
     if [[ $CREATE_SYMLINKS -eq 1 ]]; then
-        ln -sf wine/bin "${SCRIPT_DIR}/bin"
-        ln -sf wine/lib "${SCRIPT_DIR}/lib"
-        ln -sf wine/share "${SCRIPT_DIR}/share"
+        ln -sfn wine/bin "${SCRIPT_DIR}/bin"
+        ln -sfn wine/lib "${SCRIPT_DIR}/lib"
+        ln -sfn wine/share "${SCRIPT_DIR}/share"
     fi
 
     log "  Wine Staging ${WINE_VERSION} installed."
     progress "done"
+fi
+
+# Gcenx Wine builds need the GStreamer runtime (installed "for all users")
+# for in-game video/media playback. Non-fatal: Steam itself runs without it.
+if [[ ! -d "/Library/Frameworks/GStreamer.framework" ]]; then
+    log ""
+    log "NOTE: GStreamer.framework not found in /Library/Frameworks."
+    log "  Wine needs the GStreamer runtime (installed for all users) for game"
+    log "  video/media playback: https://gstreamer.freedesktop.org/download/"
 fi
 
 log ""
