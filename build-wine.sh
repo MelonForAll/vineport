@@ -62,7 +62,9 @@ die()   { echo "ERROR: $*" >&2; exit 1; }
 
 check_arch() {
     if [[ "$(uname -m)" == "arm64" ]]; then
-        if ! /usr/bin/pgrep -q oahd; then
+        # Functional check — pgrep oahd has a false-negative window (oahd is
+        # launch-on-demand and only runs after the first x86_64 exec since boot).
+        if ! arch -x86_64 /usr/bin/true 2>/dev/null; then
             info "Installing Rosetta 2..."
             softwareupdate --install-rosetta --agree-to-license
         fi
@@ -135,11 +137,16 @@ clone_wine() {
         cd "${SCRIPT_DIR}"
     else
         info "Cloning Wine source (tag: ${WINE_VERSION})..."
+        # An aborted clone leaves a partial tree without .git that wedges every
+        # retry with "destination path already exists" — clear it first.
+        if [[ -d "${WINE_SRC_DIR}" ]]; then rm -rf "${WINE_SRC_DIR}"; fi
         git clone --depth=1 --branch "${WINE_VERSION}" \
             https://gitlab.winehq.org/wine/wine.git "${WINE_SRC_DIR}" \
             || {
                 # Fallback full clone lands on the default branch — pin it to the tag.
-                git clone https://gitlab.winehq.org/wine/wine.git "${WINE_SRC_DIR}"
+                rm -rf "${WINE_SRC_DIR}"
+                git clone https://gitlab.winehq.org/wine/wine.git "${WINE_SRC_DIR}" \
+                    || die "Could not clone Wine source. Check your network and retry."
                 git -C "${WINE_SRC_DIR}" checkout "${WINE_VERSION}" 2>/dev/null \
                     || git -C "${WINE_SRC_DIR}" checkout "tags/${WINE_VERSION}" 2>/dev/null \
                     || die "Could not check out ${WINE_VERSION}. Building the wrong Wine version would silently break compatibility."
