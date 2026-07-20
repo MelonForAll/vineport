@@ -5,7 +5,7 @@ PREFIX ?= $(HOME)/Library/Application Support/Vineport
 CEF_DIR = $(PREFIX)/drive_c/Program Files (x86)/Steam/bin/cef/cef.win64
 
 # Bundle paths
-VERSION = 0.1.1
+VERSION = 0.1.2
 BUNDLE = dist/Vineport.app
 BUNDLE_CONTENTS = $(BUNDLE)/Contents
 BUNDLE_MACOS = $(BUNDLE_CONTENTS)/MacOS

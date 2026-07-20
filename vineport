@@ -638,6 +638,9 @@ setup_epic_wine_env() {
         export WINEDATADIR="${WINE_DIR}/share/wine"
         export DYLD_LIBRARY_PATH="${WINE_DIR}/lib"
         export PATH="${WINE_BIN}:${PATH}"
+        # Pin our own wineserver — a stale inherited WINESERVER (e.g. from a
+        # GPTK shell) would make wine talk to the wrong server.
+        export WINESERVER="${WINE_BIN}/wineserver"
     fi
 }
 
@@ -733,9 +736,20 @@ epic_launch() {
 
     if [[ $launch_rc -eq 0 ]]; then
         # legendary returns as soon as the game process SPAWNS — wait for the
-        # prefix's wine processes to drain before uploading, or we would sync
-        # the pre-game state while the game is still running.
-        "${WINESERVER:-${WINE_BIN}/wineserver}" -w 2>/dev/null || true
+        # game's own processes (matched by install-dir name) before uploading.
+        # Waiting on the whole prefix (wineserver -w) would also wait on a
+        # Steam client sharing it, stalling the upload until Steam quits.
+        local gd_pat waited=0
+        gd_pat=$(printf '%s' "$(basename "$gamedir")" | sed 's/[][\.*^$()+?{}|]/\\&/g')
+        # Exclude our own process — the app name can match the folder name.
+        while ! pgrep -f "$gd_pat" 2>/dev/null | grep -qv "^$$\$" \
+              && [[ $waited -lt 30 ]]; do
+            sleep 2
+            waited=$((waited + 2))
+        done
+        while pgrep -f "$gd_pat" 2>/dev/null | grep -qv "^$$\$"; do
+            sleep 5
+        done
         echo ""
         echo -e "  ${DIM}Syncing cloud saves back up...${NC}"
         sync_out=$($LEGENDARY_CMD -y sync-saves --accept-path "$game_name" 2>&1) \
@@ -1001,8 +1015,10 @@ export DYLD_LIBRARY_PATH=\"${WINE_DIR}/lib\""
     fi
     # SIP strips DYLD_* whenever a protected binary (like winetricks' /bin/sh)
     # is exec'd, so hand winetricks a wrapper that sets the Wine env itself
-    # right before exec'ing the real wine binary.
-    local wrapper="${HOME}/.cache/vineport/wine-env-wrapper.sh"
+    # right before exec'ing the real wine binary. Per-invocation temp file:
+    # a fixed path would be rewritten under a concurrent run's feet.
+    local wrapper
+    wrapper="$(mktemp "${HOME}/.cache/vineport/wine-env-wrapper-XXXXXX")"
     cat > "$wrapper" <<WRAP
 #!/bin/bash
 ${wrapper_env}
@@ -1010,9 +1026,16 @@ exec "${wine_bin}" "\$@"
 WRAP
     chmod +x "$wrapper"
     echo -e "${BOLD}winetricks $* ${NC}${DIM}(prefix: ${prefix})${NC}"
-    WINE="$wrapper" WINESERVER="$wineserver_bin" WINEPREFIX="$prefix" \
+    # WINE_BIN/WINESERVER_BIN are winetricks' documented hints for wrapper
+    # setups: they point at the REAL Mach-O binaries so its lipo-based arch
+    # detection works (lipo can't type a shell-script WINE — fatal otherwise).
+    local rc=0
+    WINE="$wrapper" WINE_BIN="$wine_bin" WINESERVER="$wineserver_bin" \
+        WINESERVER_BIN="$wineserver_bin" WINEPREFIX="$prefix" \
         WINEARCH=win64 PATH="$(dirname "$wine_bin"):${PATH}" \
-        "${WINETRICKS_CACHE}" --unattended "$@"
+        "${WINETRICKS_CACHE}" --unattended "$@" || rc=$?
+    rm -f "$wrapper"
+    return $rc
 }
 
 # ── Main ──────────────────────────────────────────────────────────────

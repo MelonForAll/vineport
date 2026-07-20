@@ -551,9 +551,22 @@ class ProcessManager: ObservableObject {
                 if useGPTK { outputLog += "Preparing GPTK prefix...\n" }
                 let shared = library.supportDir.path
                 let launchArgs = gameArgs
+                let installDir = game.installDir
                 DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                     guard let self = self else { return }
                     self.syncEpicSaves(appName: game.id)
+                    // Check cancellation before the prefix init too — a
+                    // first-time wineboot can take the better part of a minute.
+                    var cancelled = false
+                    DispatchQueue.main.sync { cancelled = self.prepCancelled }
+                    if cancelled {
+                        DispatchQueue.main.async {
+                            self.outputLog += "Launch cancelled.\n"
+                            self.isRunning = false
+                            self.currentGame = nil
+                        }
+                        return
+                    }
                     let prefix = useGPTK
                         ? self.ensureGPTKPrefix(sharedPrefix: shared, gptkWine: gptkWine)
                         : shared
@@ -570,15 +583,17 @@ class ProcessManager: ObservableObject {
                             "--wine", wineBin,
                             "--wine-prefix", prefix
                         ] + launchArgs, gptk: useGPTK, winePrefix: prefix, extraEnv: extraEnv,
-                        onExit: { [weak self] in
-                            guard let self = self else { return }
+                        onExit: { [weak self] status in
+                            // A failed legendary launch (bad auth, unknown app)
+                            // has no game to wait for and nothing to upload.
+                            guard let self = self, status == 0 else { return }
                             // legendary exits as soon as the game SPAWNS — wait
-                            // for the prefix's wine processes to drain, then
-                            // upload; the UI stays "running" throughout.
+                            // for the game's own processes, then upload; the UI
+                            // stays "running" throughout.
                             DispatchQueue.main.async {
                                 self.outputLog += "Game running — cloud saves will sync after exit...\n"
                             }
-                            self.waitForPrefixDrain(prefix: prefix, gptk: useGPTK)
+                            self.waitForGameExit(installDir: installDir)
                             DispatchQueue.main.async {
                                 self.outputLog += "Uploading cloud saves...\n"
                             }
@@ -758,31 +773,47 @@ class ProcessManager: ObservableObject {
         proc.standardError = FileHandle.nullDevice
         do {
             try proc.run()
-            prepProcess = proc
-            proc.waitUntilExit()
-            prepProcess = nil
-        } catch {}
+        } catch {
+            return
+        }
+        // prepProcess is read by stop() on the main thread — hop assignments
+        // through main so Stop can't miss the process it exists to kill.
+        DispatchQueue.main.sync { prepProcess = proc }
+        proc.waitUntilExit()
+        DispatchQueue.main.sync { prepProcess = nil }
     }
 
-    // Wait for every wine process in the prefix to exit. Blocking; Stop
-    // unblocks it because the wineserver -k it sends drains the prefix.
-    private func waitForPrefixDrain(prefix: String, gptk: Bool) {
-        let server = gptk
-            ? "/Applications/Game Porting Toolkit.app/Contents/Resources/wine/bin/wineserver"
-            : library.wineDir.appendingPathComponent("bin/wineserver").path
-        guard FileManager.default.isExecutableFile(atPath: server) else { return }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: server)
-        p.arguments = ["-w"]
-        var env = ProcessInfo.processInfo.environment
-        env["WINEPREFIX"] = prefix
-        p.environment = env
-        p.standardOutput = FileHandle.nullDevice
-        p.standardError = FileHandle.nullDevice
-        do {
-            try p.run()
+    // Wait for the game's own processes (matched by its install dir name) to
+    // exit. Waiting on the whole prefix (wineserver -w) would also wait on a
+    // Steam client sharing it, holding the save upload — and the UI — hostage.
+    private func waitForGameExit(installDir: String) {
+        let name = (installDir as NSString).lastPathComponent
+        guard !name.isEmpty else { return }
+        let needle = NSRegularExpression.escapedPattern(for: name)
+        func gameRunning() -> Bool {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+            p.arguments = ["-qf", needle]
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            do {
+                try p.run()
+            } catch {
+                return false
+            }
             p.waitUntilExit()
-        } catch {}
+            return p.terminationStatus == 0
+        }
+        // legendary returns before the game has spawned — give it up to 30s
+        // to appear, then wait for it to finish.
+        var waited = 0
+        while !gameRunning() && waited < 30 {
+            Thread.sleep(forTimeInterval: 2)
+            waited += 2
+        }
+        while gameRunning() {
+            Thread.sleep(forTimeInterval: 5)
+        }
     }
 
     // Run a legendary maintenance command (update/verify/repair/uninstall) in
@@ -792,7 +823,7 @@ class ProcessManager: ObservableObject {
         currentGame = nil
         outputLog = "\(title)...\n"
         runProcess(path: legendaryPath, arguments: arguments,
-                   onExit: rescanOnExit ? { [weak self] in
+                   onExit: rescanOnExit ? { [weak self] _ in
                        DispatchQueue.main.async { self?.library.scan() }
                    } : nil)
     }
@@ -809,7 +840,7 @@ class ProcessManager: ObservableObject {
     }
 
     private func runProcess(path: String, arguments: [String], gptk: Bool = false, winePrefix: String? = nil,
-                            extraEnv: [String: String] = [:], onExit: (() -> Void)? = nil) {
+                            extraEnv: [String: String] = [:], onExit: ((Int32) -> Void)? = nil) {
         isRunning = true
 
         let proc = Process()
@@ -848,6 +879,10 @@ class ProcessManager: ObservableObject {
         if gptk {
             env.removeValue(forKey: "DYLD_LIBRARY_PATH")
             env.removeValue(forKey: "WINEDATADIR")
+            // Profile env (incl. the dxvk toggle's native-first override) must
+            // never soften the D3DMetal builtin pins — native DXVK needs
+            // Vulkan, which GPTK's Wine doesn't provide.
+            env["WINEDLLOVERRIDES"] = "d3d9,d3d10,d3d10core,d3d11,d3d12,d3d12core,dxgi=b"
         }
         proc.environment = env
 
@@ -886,7 +921,7 @@ class ProcessManager: ObservableObject {
             }
             // Runs while the UI still shows the session as running — for game
             // launches this waits out the real game and uploads cloud saves.
-            onExit?()
+            onExit?(p.terminationStatus)
             DispatchQueue.main.async {
                 self?.persistLaunchLog()
                 self?.isRunning = false
