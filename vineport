@@ -713,13 +713,23 @@ epic_launch() {
         echo -e "  ${DIM}Anti-cheat detected — launching offline (EOS null client).${NC}"
     fi
 
+    # Cloud saves: pull the latest before launch. Best-effort — games without
+    # cloud-save support just no-op, and a sync failure shouldn't block play.
+    echo -e "  ${DIM}Syncing cloud saves...${NC}"
+    $LEGENDARY_CMD -y sync-saves "$game_name" 2>/dev/null || true
+
     # Use legendary to launch, telling it which Wine to use (GPTK/D3DMetal when
     # available, else bundled) and our prefix.
     $LEGENDARY_CMD launch "$game_name" \
         --wine "${EPIC_WINE}" \
         --wine-prefix "${WINEPREFIX}" \
         $game_args \
-        2>&1
+        2>&1 || true
+
+    # Push saves back up after the game exits.
+    echo ""
+    echo -e "  ${DIM}Syncing cloud saves back up...${NC}"
+    $LEGENDARY_CMD -y sync-saves "$game_name" 2>/dev/null || true
 }
 
 epic_info() {
@@ -859,6 +869,11 @@ usage() {
     echo "  vineport epic install <name>           Install an Epic game"
     echo "  vineport epic launch <name>            Launch an Epic game"
     echo "  vineport epic info <name>              Show Epic game details"
+    echo "  (cloud saves sync automatically around 'epic launch')"
+    echo ""
+    echo "Winetricks:"
+    echo "  vineport tricks [--gptk] <verb...>     Install redists/fonts into the prefix"
+    echo "                                         (e.g. vcrun2022 corefonts d3dcompiler_47)"
     echo ""
     echo "Profile options:"
     echo "  --set KEY=VALUE    Set a profile value (dxvk, game_args, env.VAR)"
@@ -887,6 +902,61 @@ resolve_appid() {
     fi
 }
 
+# ── Winetricks ────────────────────────────────────────────────────────
+# Pinned release, verified by checksum before first use (downloaded on demand).
+WINETRICKS_VERSION="20260125"
+WINETRICKS_SHA256="431f82fc74000e6c864409f1d8fb495d696c03928808e3e8acffc45179312a7b"
+WINETRICKS_CACHE="${HOME}/.cache/vineport/winetricks-${WINETRICKS_VERSION}"
+
+ensure_winetricks() {
+    [[ -x "${WINETRICKS_CACHE}" ]] && return 0
+    mkdir -p "$(dirname "${WINETRICKS_CACHE}")"
+    echo "Downloading winetricks ${WINETRICKS_VERSION}..."
+    local tmp sha
+    tmp="$(mktemp /tmp/winetricks-XXXXXX)"
+    if ! curl -fsL -o "$tmp" \
+        "https://raw.githubusercontent.com/Winetricks/winetricks/${WINETRICKS_VERSION}/src/winetricks"; then
+        echo -e "${RED}Failed to download winetricks.${NC}" >&2
+        rm -f "$tmp"
+        return 1
+    fi
+    sha="$(shasum -a 256 "$tmp" | awk '{print $1}')"
+    if [[ "$sha" != "${WINETRICKS_SHA256}" ]]; then
+        echo -e "${RED}winetricks checksum mismatch!${NC}" >&2
+        echo "  Expected: ${WINETRICKS_SHA256}" >&2
+        echo "  Got:      ${sha}" >&2
+        rm -f "$tmp"
+        return 1
+    fi
+    chmod +x "$tmp" && mv "$tmp" "${WINETRICKS_CACHE}"
+}
+
+tricks_cmd() {
+    local prefix="${WINEPREFIX}"
+    if [[ "${1:-}" == "--gptk" ]]; then
+        prefix="${WINEPREFIX}-gptk"
+        shift
+    fi
+    if [[ $# -eq 0 ]]; then
+        echo "Usage: vineport tricks [--gptk] <verb...>"
+        echo "  Common verbs: vcrun2022 corefonts d3dcompiler_47 dotnet48 dxvk"
+        echo "  Full list:    vineport tricks list-all"
+        echo "  --gptk        Apply to the dedicated GPTK prefix instead"
+        return 1
+    fi
+    if [[ ! -x "${WINE_BIN}/wine" ]]; then
+        echo -e "${RED}wine not found at ${WINE_BIN}/wine — run ./setup.sh first.${NC}" >&2
+        return 1
+    fi
+    ensure_winetricks || return 1
+    if ! command -v cabextract &>/dev/null; then
+        echo -e "${YELLOW}Note: many winetricks verbs need cabextract: brew install cabextract${NC}"
+    fi
+    echo -e "${BOLD}winetricks $* ${NC}${DIM}(prefix: ${prefix})${NC}"
+    WINE="${WINE_BIN}/wine" WINESERVER="${WINE_BIN}/wineserver" WINEPREFIX="$prefix" \
+        "${WINETRICKS_CACHE}" --unattended "$@"
+}
+
 # ── Main ──────────────────────────────────────────────────────────────
 init_profiles
 
@@ -912,6 +982,10 @@ case "${1:-}" in
         ;;
     steam)
         exec "${SCRIPT_DIR}/launch-steam.sh" "${@:2}"
+        ;;
+    tricks|winetricks)
+        shift
+        tricks_cmd "$@"
         ;;
     epic)
         shift
