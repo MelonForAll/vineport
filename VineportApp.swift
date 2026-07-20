@@ -68,7 +68,10 @@ enum ProfileStore {
         (((load() ?? [:])["games"] as? [String: Any])?[id] as? [String: Any]) ?? [:]
     }
 
-    static func setProfile(_ profile: [String: Any], for id: String) {
+    // Returns false if the write was refused/failed (corrupt file, IO error) so
+    // callers can surface it instead of silently losing the edit.
+    @discardableResult
+    static func setProfile(_ profile: [String: Any], for id: String) -> Bool {
         var root: [String: Any]
         if let loaded = load() {
             root = loaded
@@ -77,7 +80,7 @@ enum ProfileStore {
         } else {
             // Existing but unreadable/corrupt file — refuse to write rather
             // than rebuild from scratch and wipe every other profile.
-            return
+            return false
         }
         var games = (root["games"] as? [String: Any]) ?? [:]
         if profile.isEmpty {
@@ -88,8 +91,14 @@ enum ProfileStore {
         root["games"] = games
         let dir = fileURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        if let data = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys]) {
-            try? data.write(to: fileURL, options: .atomic)
+        guard let data = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys]) else {
+            return false
+        }
+        do {
+            try data.write(to: fileURL, options: .atomic)
+            return true
+        } catch {
+            return false
         }
     }
 }
@@ -998,7 +1007,7 @@ class ProcessManager: ObservableObject {
                 return String(sha.trimmingCharacters(in: .whitespacesAndNewlines).prefix(8))
             }
             if let packed = try? String(contentsOf: gitDir.appendingPathComponent("packed-refs"), encoding: .utf8) {
-                for line in packed.split(separator: "\n") where line.hasSuffix(ref) {
+                for line in packed.split(separator: "\n") where line.hasSuffix(" " + ref) {
                     return String(line.prefix(8))
                 }
             }
@@ -2113,6 +2122,7 @@ struct GameSettingsView: View {
     @State private var gameArgs = ""
     @State private var envText = ""
     @State private var confirmUninstall = false
+    @State private var saveError = false
 
     private var profileID: String { game.source == .epic ? "epic:\(game.id)" : game.id }
 
@@ -2154,14 +2164,20 @@ struct GameSettingsView: View {
             Divider()
             HStack {
                 Button("Reset Profile") {
-                    ProfileStore.setProfile([:], for: profileID)
-                    loadProfile()
+                    if ProfileStore.setProfile([:], for: profileID) {
+                        loadProfile()
+                    } else {
+                        saveError = true
+                    }
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }
                 Button("Save") {
-                    saveProfile()
-                    dismiss()
+                    if saveProfile() {
+                        dismiss()
+                    } else {
+                        saveError = true
+                    }
                 }
                 .buttonStyle(.borderedProminent)
             }
@@ -2176,6 +2192,11 @@ struct GameSettingsView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Removes the game files from disk. Cloud saves are kept by Epic.")
+        }
+        .alert("Couldn't save settings", isPresented: $saveError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("~/.config/vineport/profiles.json is unreadable or couldn't be written. Fix or delete it and try again.")
         }
     }
 
@@ -2196,7 +2217,7 @@ struct GameSettingsView: View {
         envText = lines.joined(separator: "\n")
     }
 
-    private func saveProfile() {
+    private func saveProfile() -> Bool {
         // Merge into the existing profile — the CLI stores keys this sheet
         // doesn't manage (wine_args, arbitrary --set values); never drop them.
         var p = ProfileStore.profile(for: profileID)
@@ -2211,7 +2232,7 @@ struct GameSettingsView: View {
             if !k.isEmpty { env[k] = v }
         }
         if env.isEmpty { p.removeValue(forKey: "env") } else { p["env"] = env }
-        ProfileStore.setProfile(p, for: profileID)
+        return ProfileStore.setProfile(p, for: profileID)
     }
 }
 

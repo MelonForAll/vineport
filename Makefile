@@ -6,6 +6,9 @@ CEF_DIR = $(PREFIX)/drive_c/Program Files (x86)/Steam/bin/cef/cef.win64
 
 # Bundle paths
 VERSION = 0.1.2
+# CFBundleVersion must increase monotonically and beat any older bundle on disk
+# (early builds shipped "2.0"), so LaunchServices always resolves to the newest.
+BUILD = 100
 BUNDLE = dist/Vineport.app
 BUNDLE_CONTENTS = $(BUNDLE)/Contents
 BUNDLE_MACOS = $(BUNDLE_CONTENTS)/MacOS
@@ -60,7 +63,7 @@ bundle: wrapper
 	@echo '<key>CFBundleExecutable</key><string>Vineport</string>' >> "$(BUNDLE_CONTENTS)/Info.plist"
 	@echo '<key>CFBundleIdentifier</key><string>com.melonforall.vineport</string>' >> "$(BUNDLE_CONTENTS)/Info.plist"
 	@echo '<key>CFBundleName</key><string>Vineport</string>' >> "$(BUNDLE_CONTENTS)/Info.plist"
-	@echo '<key>CFBundleVersion</key><string>$(VERSION)</string>' >> "$(BUNDLE_CONTENTS)/Info.plist"
+	@echo '<key>CFBundleVersion</key><string>$(BUILD)</string>' >> "$(BUNDLE_CONTENTS)/Info.plist"
 	@echo '<key>CFBundleShortVersionString</key><string>$(VERSION)</string>' >> "$(BUNDLE_CONTENTS)/Info.plist"
 	@echo '<key>NSAppleEventsUsageDescription</key><string>Vineport needs accessibility to dismiss game dialogs.</string>' >> "$(BUNDLE_CONTENTS)/Info.plist"
 	@echo '</dict></plist>' >> "$(BUNDLE_CONTENTS)/Info.plist"
