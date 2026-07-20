@@ -141,7 +141,9 @@ if [[ $NO_EAC -eq 1 ]]; then
     cd "${WORK_DIR}"
     echo "Launching ${GAME_EXE} directly (offline)..."
     echo ""
-    "${WINE_BIN}/wine" "./${GAME_EXE}" "${EXTRA_ARGS[@]}" || true
+    vineport_desktop_cmd
+    vineport_exit_watchdog "${GAME_EXE}"
+    "${WINE_BIN}/wine" ${DESKTOP_CMD[@]+"${DESKTOP_CMD[@]}"} "./${GAME_EXE}" "${EXTRA_ARGS[@]}" || true
 
     # Game exited: kill the background Steam we started so the prefix can shut
     # down (otherwise wineserver would stay alive forever waiting on it).

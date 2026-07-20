@@ -86,6 +86,62 @@ vineport_main_exe() {
     if [[ -n "$name_match" ]]; then echo "$name_match"; else echo "$best"; fi
 }
 
+# Watch the game process and clean up if it deadlocks on exit. Some games
+# (e.g. Elden Ring) wedge instead of exiting when quit under Wine, leaving a
+# captured black fullscreen window behind until someone kills the session.
+# A deadlocked process schedules no CPU, so its %cpu decays to 0.0 and stays
+# there; live game states (menus, pause, loading, background) always keep
+# above zero. Six consecutive 0.0 samples, 10s apart, trigger a wineserver
+# shutdown. Set VINEPORT_NO_WATCHDOG=1 to disable. Runs in the background,
+# survives exec, and exits by itself once the game is gone.
+# Args: $1 = game exe name (pgrep -f pattern). Uses ${WINESERVER}.
+vineport_exit_watchdog() {
+    [[ "${VINEPORT_NO_WATCHDOG:-0}" != "1" ]] || return 0
+    [[ -n "${1:-}" ]] || return 0
+    local pattern="$1" server="${WINESERVER}"
+    (
+        zeros=0
+        seen=0
+        while sleep 10; do
+            pids=$(pgrep -f "$pattern" || true)
+            if [[ -z "$pids" ]]; then
+                [[ $seen -eq 1 ]] && break   # game ran and exited — done
+                continue                      # not started yet
+            fi
+            seen=1
+            cpu=$(ps -o %cpu= -p $pids 2>/dev/null | sort -rn | head -1 | tr -d ' ')
+            if [[ "$cpu" == "0.0" ]]; then
+                zeros=$((zeros + 1))
+            else
+                zeros=0
+            fi
+            if [[ $zeros -ge 6 ]]; then
+                echo "Game appears wedged after exit (no CPU for 60s) — cleaning up..."
+                "$server" -k 2>/dev/null || true
+                break
+            fi
+        done
+    ) &
+}
+
+# Optional windowed virtual desktop: set VINEPORT_DESKTOP=1 (auto-size to the
+# main display) or VINEPORT_DESKTOP=WxH. The game then renders inside a Wine
+# desktop window instead of capturing the display, so other monitors stay
+# usable. Sets the DESKTOP_CMD array (empty when disabled) for use as:
+#   "${WINE}" ${DESKTOP_CMD[@]+"${DESKTOP_CMD[@]}"} game.exe ...
+vineport_desktop_cmd() {
+    DESKTOP_CMD=()
+    [[ -n "${VINEPORT_DESKTOP:-}" && "${VINEPORT_DESKTOP}" != "0" ]] || return 0
+    local res="${VINEPORT_DESKTOP}"
+    if [[ ! "$res" =~ ^[0-9]+x[0-9]+$ ]]; then
+        res="$(osascript -e 'tell application "Finder" to get bounds of window of desktop' 2>/dev/null \
+            | awk -F', ' '{print $3"x"$4}')"
+        [[ "$res" =~ ^[0-9]+x[0-9]+$ ]] || res="1920x1080"
+    fi
+    DESKTOP_CMD=(explorer "/desktop=Vineport,${res}")
+    echo "Windowed desktop mode: ${res} (other displays stay usable)."
+}
+
 # Kill any stale wineserver for the current prefix (no-op if none running).
 vineport_kill_wineserver() {
     "${WINESERVER_BIN}" -k 2>/dev/null && sleep 1 || true

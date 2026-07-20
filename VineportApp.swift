@@ -650,6 +650,11 @@ class ProcessManager: ObservableObject {
         var env = ProcessInfo.processInfo.environment
         env["WINEPREFIX"] = winePrefix ?? library.supportDir.path
         env["WINEARCH"] = "win64"
+        // Windowed-desktop preference: honored by the launch scripts via
+        // vineport_desktop_cmd (direct legendary launches ignore it).
+        if UserDefaults.standard.bool(forKey: "windowedDesktop") {
+            env["VINEPORT_DESKTOP"] = "1"
+        }
         if env["WINEDEBUG"] == nil { env["WINEDEBUG"] = "-all" }
         env["WINEMSYNC"] = "1"
         env["WINEESYNC"] = "1"
@@ -1766,6 +1771,7 @@ struct ContentView: View {
     @State private var showRunningView = false
     @State private var searchText = ""
     @State private var showSteamInstallHint = false
+    @AppStorage("windowedDesktop") private var windowedDesktop = false
 
     init() {
         let lib = GameLibrary()
@@ -1863,6 +1869,17 @@ struct ContentView: View {
                                         }
                                     }
                                     .font(.system(.caption, design: .monospaced))
+                                    .padding(4)
+                                }
+                                .frame(maxWidth: 500)
+
+                                GroupBox("Display") {
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        Toggle("Run games in a windowed desktop", isOn: $windowedDesktop)
+                                        Text("The game renders inside a resizable window instead of capturing the display, so other monitors stay usable. Takes effect on the next launch.")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
                                     .padding(4)
                                 }
                                 .frame(maxWidth: 500)

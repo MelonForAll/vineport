@@ -119,7 +119,9 @@ cleanup() {
 trap cleanup INT TERM HUP
 
 cd "${WORK_DIR}"
-"${WINE_BIN}" "./${GAME_EXE}" "$@" || true
+vineport_desktop_cmd
+vineport_exit_watchdog "${GAME_EXE}"
+"${WINE_BIN}" ${DESKTOP_CMD[@]+"${DESKTOP_CMD[@]}"} "./${GAME_EXE}" "$@" || true
 
 "${WINESERVER}" -w || true
 [[ -n "$DISMISS_PID" ]] && kill "$DISMISS_PID" 2>/dev/null || true

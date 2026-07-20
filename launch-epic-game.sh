@@ -134,18 +134,22 @@ if [[ $NO_EAC -eq 1 ]]; then
     cd "${WORK_DIR}"
     echo "Launching ${GAME_EXE} (offline)..."
     echo ""
-    exec "${WINE_GAME}" "./${GAME_EXE}" ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} "${EXTRA_ARGS[@]}"
+    vineport_desktop_cmd
+    vineport_exit_watchdog "${GAME_EXE}"    # background child; survives exec
+    exec "${WINE_GAME}" ${DESKTOP_CMD[@]+"${DESKTOP_CMD[@]}"} "./${GAME_EXE}" ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} "${EXTRA_ARGS[@]}"
 
 else
     # ── Normal launch (default) ──────────────────────────────────────
     echo "=== Launching ${GAME_TITLE} ==="
 
+    vineport_desktop_cmd
+    vineport_exit_watchdog "${GAME_EXE:-$(basename "${EAC_EXE:-}")}"    # survives exec
     if [[ -n "$EAC_EXE" ]]; then
         cd "${WORK_DIR}"
-        exec "${WINE_GAME}" "$(basename "${EAC_EXE}")" "${EXTRA_ARGS[@]}"
+        exec "${WINE_GAME}" ${DESKTOP_CMD[@]+"${DESKTOP_CMD[@]}"} "$(basename "${EAC_EXE}")" "${EXTRA_ARGS[@]}"
     elif [[ -n "$GAME_EXE" ]]; then
         cd "${WORK_DIR}"
-        exec "${WINE_GAME}" "./${GAME_EXE}" "${EXTRA_ARGS[@]}"
+        exec "${WINE_GAME}" ${DESKTOP_CMD[@]+"${DESKTOP_CMD[@]}"} "./${GAME_EXE}" "${EXTRA_ARGS[@]}"
     else
         echo "ERROR: No executable found in ${WORK_DIR}" >&2
         exit 1
