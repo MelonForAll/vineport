@@ -82,6 +82,24 @@ if [[ ! -d "${WINEPREFIX}/drive_c" ]]; then
     echo ""
 fi
 
+# ── Steer Steam onto the win64 client track ──────────────────────────
+# The stub installer lands on the win32 client track, which Valve froze
+# (May 2026) and which hangs under Wine before ever starting its CEF
+# webhelper — a bare black "Steam" window. The win64 track is current and
+# works. Seeding its manifest into package/ makes the bootstrapper adopt
+# the track and install that client on the next update check (this also
+# repairs prefixes already stuck on the win32 client).
+STEAM_PKG_DIR="${WINEPREFIX}/drive_c/Program Files (x86)/Steam/package"
+if [[ -d "${WINEPREFIX}/drive_c/Program Files (x86)/Steam" \
+      && ! -f "${STEAM_PKG_DIR}/steam_client_win64" \
+      && ! -f "${STEAM_PKG_DIR}/steam_client_win64.installed" ]]; then
+    echo "Switching Steam to the win64 client track (fixes black screen)..."
+    mkdir -p "${STEAM_PKG_DIR}"
+    curl -fsL -o "${STEAM_PKG_DIR}/steam_client_win64" \
+        "https://cdn.steamstatic.com/client/steam_client_win64" \
+        || rm -f "${STEAM_PKG_DIR}/steam_client_win64"
+fi
+
 # ── Re-install webhelper wrapper if Steam overwrote it during an update ──
 WRAPPER_SRC="${SCRIPT_DIR}/steamwebhelper_wrapper.exe"
 CEF_DIR="${WINEPREFIX}/drive_c/Program Files (x86)/Steam/bin/cef/cef.win64"
