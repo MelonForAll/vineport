@@ -5,6 +5,7 @@ PREFIX ?= $(HOME)/Library/Application Support/Vineport
 CEF_DIR = $(PREFIX)/drive_c/Program Files (x86)/Steam/bin/cef/cef.win64
 
 # Bundle paths
+VERSION = 0.1.1
 BUNDLE = dist/Vineport.app
 BUNDLE_CONTENTS = $(BUNDLE)/Contents
 BUNDLE_MACOS = $(BUNDLE_CONTENTS)/MacOS
@@ -59,7 +60,8 @@ bundle: wrapper
 	@echo '<key>CFBundleExecutable</key><string>Vineport</string>' >> "$(BUNDLE_CONTENTS)/Info.plist"
 	@echo '<key>CFBundleIdentifier</key><string>com.melonforall.vineport</string>' >> "$(BUNDLE_CONTENTS)/Info.plist"
 	@echo '<key>CFBundleName</key><string>Vineport</string>' >> "$(BUNDLE_CONTENTS)/Info.plist"
-	@echo '<key>CFBundleVersion</key><string>2.0</string>' >> "$(BUNDLE_CONTENTS)/Info.plist"
+	@echo '<key>CFBundleVersion</key><string>$(VERSION)</string>' >> "$(BUNDLE_CONTENTS)/Info.plist"
+	@echo '<key>CFBundleShortVersionString</key><string>$(VERSION)</string>' >> "$(BUNDLE_CONTENTS)/Info.plist"
 	@echo '<key>NSAppleEventsUsageDescription</key><string>Vineport needs accessibility to dismiss game dialogs.</string>' >> "$(BUNDLE_CONTENTS)/Info.plist"
 	@echo '</dict></plist>' >> "$(BUNDLE_CONTENTS)/Info.plist"
 	# Copy runtime resources

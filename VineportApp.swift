@@ -59,19 +59,26 @@ enum ProfileStore {
             .appendingPathComponent(".config/vineport/profiles.json")
     }
 
-    static func load() -> [String: Any] {
-        guard let data = try? Data(contentsOf: fileURL),
-              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        else { return [:] }
-        return obj
+    static func load() -> [String: Any]? {
+        guard let data = try? Data(contentsOf: fileURL) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 
     static func profile(for id: String) -> [String: Any] {
-        ((load()["games"] as? [String: Any])?[id] as? [String: Any]) ?? [:]
+        (((load() ?? [:])["games"] as? [String: Any])?[id] as? [String: Any]) ?? [:]
     }
 
     static func setProfile(_ profile: [String: Any], for id: String) {
-        var root = load()
+        var root: [String: Any]
+        if let loaded = load() {
+            root = loaded
+        } else if !FileManager.default.fileExists(atPath: fileURL.path) {
+            root = [:]
+        } else {
+            // Existing but unreadable/corrupt file — refuse to write rather
+            // than rebuild from scratch and wipe every other profile.
+            return
+        }
         var games = (root["games"] as? [String: Any]) ?? [:]
         if profile.isEmpty {
             games.removeValue(forKey: id)
@@ -82,7 +89,7 @@ enum ProfileStore {
         let dir = fileURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         if let data = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys]) {
-            try? data.write(to: fileURL)
+            try? data.write(to: fileURL, options: .atomic)
         }
     }
 }
@@ -484,7 +491,7 @@ class ProcessManager: ObservableObject {
     }
 
     func launchGame(_ game: Game, mode: LaunchMode = .normal) {
-        guard !isRunning else { return }
+        guard !isRunning, !epicInstalling else { return }
         currentGame = game
         outputLog = "Launching \(game.name) [\(mode.rawValue)]...\n"
 
@@ -500,8 +507,7 @@ class ProcessManager: ObservableObject {
             // force builtin D3DMetal regardless, so this only affects bundled Wine.
             extraEnv["WINEDLLOVERRIDES"] = "d3d11,d3d10core,dxgi,d3d9=n,b"
         }
-        let gameArgs = (profile["game_args"] as? String ?? "")
-            .split(separator: " ").map(String.init)
+        let gameArgs = Self.splitArgs(profile["game_args"] as? String ?? "")
 
         switch game.source {
         case .steam:
@@ -540,6 +546,7 @@ class ProcessManager: ObservableObject {
                 let useGPTK = FileManager.default.fileExists(atPath: gptkWine)
                 let wineBin = useGPTK ? gptkWine : library.wineDir.appendingPathComponent("bin/wine").path
                 isRunning = true
+                prepCancelled = false
                 outputLog += "Syncing cloud saves...\n"
                 if useGPTK { outputLog += "Preparing GPTK prefix...\n" }
                 let shared = library.supportDir.path
@@ -551,13 +558,31 @@ class ProcessManager: ObservableObject {
                         ? self.ensureGPTKPrefix(sharedPrefix: shared, gptkWine: gptkWine)
                         : shared
                     DispatchQueue.main.async {
+                        // The user may have hit Stop during the prep.
+                        guard !self.prepCancelled else {
+                            self.outputLog += "Launch cancelled.\n"
+                            self.isRunning = false
+                            self.currentGame = nil
+                            return
+                        }
                         self.runProcess(path: legendaryPath, arguments: [
                             "launch", game.id,
                             "--wine", wineBin,
                             "--wine-prefix", prefix
                         ] + launchArgs, gptk: useGPTK, winePrefix: prefix, extraEnv: extraEnv,
                         onExit: { [weak self] in
-                            self?.syncEpicSaves(appName: game.id)
+                            guard let self = self else { return }
+                            // legendary exits as soon as the game SPAWNS — wait
+                            // for the prefix's wine processes to drain, then
+                            // upload; the UI stays "running" throughout.
+                            DispatchQueue.main.async {
+                                self.outputLog += "Game running — cloud saves will sync after exit...\n"
+                            }
+                            self.waitForPrefixDrain(prefix: prefix, gptk: useGPTK)
+                            DispatchQueue.main.async {
+                                self.outputLog += "Uploading cloud saves...\n"
+                            }
+                            self.syncEpicSaves(appName: game.id)
                         })
                     }
                 }
@@ -691,24 +716,79 @@ class ProcessManager: ObservableObject {
         return sharedPrefix + "-gptk"
     }
 
+    // Set when Stop is pressed while a launch is still in its prep phase.
+    private var prepCancelled = false
+    private var prepProcess: Process?
+
+    // Split a command-line string honoring single/double quotes, so game args
+    // with spaces in paths survive.
+    static func splitArgs(_ s: String) -> [String] {
+        var out: [String] = []
+        var cur = ""
+        var quote: Character? = nil
+        var started = false
+        for c in s {
+            if let q = quote {
+                if c == q { quote = nil } else { cur.append(c) }
+            } else if c == "\"" || c == "'" {
+                quote = c
+                started = true
+            } else if c == " " || c == "\t" {
+                if started || !cur.isEmpty {
+                    out.append(cur)
+                    cur = ""
+                    started = false
+                }
+            } else {
+                cur.append(c)
+            }
+        }
+        if started || !cur.isEmpty { out.append(cur) }
+        return out
+    }
+
     // Sync Epic cloud saves (best-effort; games without cloud saves no-op).
-    // Blocking — call off the main thread.
+    // --accept-path confirms the computed save path — a bare -y silently skips
+    // games that were never synced before. Blocking — call off the main thread.
     private func syncEpicSaves(appName: String) {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: legendaryPath)
-        proc.arguments = ["-y", "sync-saves", appName]
+        proc.arguments = ["-y", "sync-saves", "--accept-path", appName]
         proc.standardOutput = FileHandle.nullDevice
         proc.standardError = FileHandle.nullDevice
         do {
             try proc.run()
+            prepProcess = proc
             proc.waitUntilExit()
+            prepProcess = nil
+        } catch {}
+    }
+
+    // Wait for every wine process in the prefix to exit. Blocking; Stop
+    // unblocks it because the wineserver -k it sends drains the prefix.
+    private func waitForPrefixDrain(prefix: String, gptk: Bool) {
+        let server = gptk
+            ? "/Applications/Game Porting Toolkit.app/Contents/Resources/wine/bin/wineserver"
+            : library.wineDir.appendingPathComponent("bin/wineserver").path
+        guard FileManager.default.isExecutableFile(atPath: server) else { return }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: server)
+        p.arguments = ["-w"]
+        var env = ProcessInfo.processInfo.environment
+        env["WINEPREFIX"] = prefix
+        p.environment = env
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        do {
+            try p.run()
+            p.waitUntilExit()
         } catch {}
     }
 
     // Run a legendary maintenance command (update/verify/repair/uninstall) in
     // the console view.
     func runEpicMaintenance(title: String, arguments: [String], rescanOnExit: Bool = false) {
-        guard !isRunning else { return }
+        guard !isRunning, !epicInstalling else { return }
         currentGame = nil
         outputLog = "\(title)...\n"
         runProcess(path: legendaryPath, arguments: arguments,
@@ -720,7 +800,7 @@ class ProcessManager: ObservableObject {
     // Run winetricks verbs through the CLI in the console view.
     func runWinetricks(verbs: String, gptk: Bool = false) {
         let vs = verbs.split(separator: " ").map(String.init)
-        guard !vs.isEmpty, !isRunning else { return }
+        guard !vs.isEmpty, !isRunning, !epicInstalling else { return }
         currentGame = nil
         outputLog = "winetricks \(verbs)\n"
         var args = ["\(scriptDir)/vineport", "tricks"]
@@ -744,8 +824,6 @@ class ProcessManager: ObservableObject {
         if UserDefaults.standard.bool(forKey: "windowedDesktop") {
             env["VINEPORT_DESKTOP"] = "1"
         }
-        // Per-game profile env comes last so explicit user choices win.
-        for (k, v) in extraEnv { env[k] = v }
         if env["WINEDEBUG"] == nil { env["WINEDEBUG"] = "-all" }
         env["WINEMSYNC"] = "1"
         env["WINEESYNC"] = "1"
@@ -762,6 +840,14 @@ class ProcessManager: ObservableObject {
             env["WINEDATADIR"] = library.wineDir.appendingPathComponent("share/wine").path
             env["DYLD_LIBRARY_PATH"] = library.wineDir.appendingPathComponent("lib").path
             env["PATH"] = "\(library.wineDir.appendingPathComponent("bin").path):/usr/bin:/bin:/usr/sbin:/sbin"
+        }
+        // Per-game profile env is applied last so explicit user choices (e.g.
+        // WINEESYNC=0 for esync-broken games) win over the defaults — except
+        // the GPTK-critical sanitization, which must never be overridden.
+        for (k, v) in extraEnv { env[k] = v }
+        if gptk {
+            env.removeValue(forKey: "DYLD_LIBRARY_PATH")
+            env.removeValue(forKey: "WINEDATADIR")
         }
         proc.environment = env
 
@@ -797,11 +883,15 @@ class ProcessManager: ObservableObject {
                     }
                 }
                 self?.outputLog += "\n[Process exited with code \(p.terminationStatus)]\n"
+            }
+            // Runs while the UI still shows the session as running — for game
+            // launches this waits out the real game and uploads cloud saves.
+            onExit?()
+            DispatchQueue.main.async {
                 self?.persistLaunchLog()
                 self?.isRunning = false
                 self?.currentGame = nil
             }
-            onExit?()
         }
 
         do {
@@ -816,6 +906,10 @@ class ProcessManager: ObservableObject {
     }
 
     func stop() {
+        // Cancel a launch still in its prep phase (cloud-save sync / prefix
+        // init) — there is no wine process yet for the kills below to reach.
+        prepCancelled = true
+        prepProcess?.terminate()
         process?.terminate()
         // terminate() only reaches the direct child (bash/legendary); the wine
         // processes are grandchildren, and the launch scripts' cleanup traps
@@ -855,6 +949,27 @@ class ProcessManager: ObservableObject {
         try? (header + outputLog).write(
             to: logsDir.appendingPathComponent("last-launch.log"),
             atomically: true, encoding: .utf8)
+    }
+
+    // Repo revision via plain file reads — exec'ing /usr/bin/git without the
+    // Command Line Tools pops the system CLT-install dialog on user machines.
+    private func repoRevision() -> String {
+        let gitDir = library.projectDir.appendingPathComponent(".git")
+        guard let head = (try? String(contentsOf: gitDir.appendingPathComponent("HEAD"), encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) else { return "n/a" }
+        if head.hasPrefix("ref: ") {
+            let ref = String(head.dropFirst(5))
+            if let sha = try? String(contentsOf: gitDir.appendingPathComponent(ref), encoding: .utf8) {
+                return String(sha.trimmingCharacters(in: .whitespacesAndNewlines).prefix(8))
+            }
+            if let packed = try? String(contentsOf: gitDir.appendingPathComponent("packed-refs"), encoding: .utf8) {
+                for line in packed.split(separator: "\n") where line.hasSuffix(ref) {
+                    return String(line.prefix(8))
+                }
+            }
+            return "n/a"
+        }
+        return String(head.prefix(8))
     }
 
     private func runQuick(_ path: String, _ args: [String]) -> String {
@@ -898,7 +1013,7 @@ class ProcessManager: ObservableObject {
         let gptkWine = "/Applications/Game Porting Toolkit.app/Contents/Resources/wine/bin/wine64"
         var r = "=== Vineport diagnostics ===\n"
         r += "macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)\n"
-        r += "vineport rev: \(runQuick("/usr/bin/git", ["-C", library.projectDir.path, "rev-parse", "--short", "HEAD"]))\n"
+        r += "vineport rev: \(repoRevision())\n"
         r += "wine: \(runQuick(library.wineDir.appendingPathComponent("bin/wine").path, ["--version"])) at \(library.wineDir.path)\n"
         r += "GPTK: \(runQuick(gptkWine, ["--version"]))\n"
         r += "legendary: \(runQuick(legendaryPath, ["--version"]))\n"
@@ -1039,6 +1154,8 @@ class ProcessManager: ObservableObject {
     }
 
     func epicInstall(appName: String) {
+        // Never run two legendary instances against the same install state.
+        guard !isRunning, !epicInstalling else { return }
         epicInstalling = true
         epicInstallProgress = "Starting download..."
 
@@ -1996,7 +2113,7 @@ struct GameSettingsView: View {
                     Spacer()
                     Button("Uninstall", role: .destructive) { confirmUninstall = true }
                 }
-                .disabled(processManager.isRunning)
+                .disabled(processManager.isRunning || processManager.epicInstalling)
             }
 
             Divider()
@@ -2045,10 +2162,12 @@ struct GameSettingsView: View {
     }
 
     private func saveProfile() {
-        var p: [String: Any] = [:]
-        if dxvk { p["dxvk"] = true }
+        // Merge into the existing profile — the CLI stores keys this sheet
+        // doesn't manage (wine_args, arbitrary --set values); never drop them.
+        var p = ProfileStore.profile(for: profileID)
+        if dxvk { p["dxvk"] = true } else { p.removeValue(forKey: "dxvk") }
         let args = gameArgs.trimmingCharacters(in: .whitespaces)
-        if !args.isEmpty { p["game_args"] = args }
+        if args.isEmpty { p.removeValue(forKey: "game_args") } else { p["game_args"] = args }
         var env: [String: String] = [:]
         for line in envText.split(separator: "\n") {
             guard let eq = line.firstIndex(of: "=") else { continue }
@@ -2056,7 +2175,7 @@ struct GameSettingsView: View {
             let v = String(line[line.index(after: eq)...])
             if !k.isEmpty { env[k] = v }
         }
-        if !env.isEmpty { p["env"] = env }
+        if env.isEmpty { p.removeValue(forKey: "env") } else { p["env"] = env }
         ProfileStore.setProfile(p, for: profileID)
     }
 }
@@ -2071,6 +2190,7 @@ struct ContentView: View {
     @AppStorage("windowedDesktop") private var windowedDesktop = false
     @State private var settingsGame: Game?
     @State private var tricksVerbs = ""
+    @State private var tricksGPTK = false
     @State private var diagCopied = false
 
     init() {
@@ -2190,13 +2310,15 @@ struct ContentView: View {
                                             TextField("verbs, e.g. vcrun2022 corefonts", text: $tricksVerbs)
                                                 .textFieldStyle(.roundedBorder)
                                             Button("Run") {
-                                                processManager.runWinetricks(verbs: tricksVerbs)
+                                                processManager.runWinetricks(verbs: tricksVerbs, gptk: tricksGPTK)
                                                 showRunningView = true
                                             }
                                             .disabled(tricksVerbs.trimmingCharacters(in: .whitespaces).isEmpty
                                                       || processManager.isRunning)
                                         }
-                                        Text("Installs Windows redistributables and fonts into the Wine prefix. Common verbs: vcrun2022, corefonts, d3dcompiler_47, dotnet48.")
+                                        Toggle("Apply to the GPTK prefix (games launched via D3DMetal)", isOn: $tricksGPTK)
+                                            .font(.caption)
+                                        Text("Installs Windows redistributables and fonts into the Wine prefix. Common verbs: vcrun2022, corefonts, d3dcompiler_47, dotnet48. GPTK machines run games in the GPTK prefix — apply verbs there for those games.")
                                             .font(.caption)
                                             .foregroundColor(.secondary)
                                     }

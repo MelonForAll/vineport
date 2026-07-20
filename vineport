@@ -713,23 +713,35 @@ epic_launch() {
         echo -e "  ${DIM}Anti-cheat detected — launching offline (EOS null client).${NC}"
     fi
 
-    # Cloud saves: pull the latest before launch. Best-effort — games without
-    # cloud-save support just no-op, and a sync failure shouldn't block play.
+    # Cloud saves: pull the latest before launch. --accept-path confirms the
+    # computed save path non-interactively — a bare -y makes legendary silently
+    # SKIP any game whose path was never confirmed. Best-effort, but surface
+    # failures instead of hiding them behind an affirmative message.
     echo -e "  ${DIM}Syncing cloud saves...${NC}"
-    $LEGENDARY_CMD -y sync-saves "$game_name" 2>/dev/null || true
+    local sync_out
+    sync_out=$($LEGENDARY_CMD -y sync-saves --accept-path "$game_name" 2>&1) \
+        || echo -e "  ${YELLOW}Cloud-save sync failed: $(printf '%s\n' "$sync_out" | tail -1)${NC}"
 
     # Use legendary to launch, telling it which Wine to use (GPTK/D3DMetal when
     # available, else bundled) and our prefix.
+    local launch_rc=0
     $LEGENDARY_CMD launch "$game_name" \
         --wine "${EPIC_WINE}" \
         --wine-prefix "${WINEPREFIX}" \
         $game_args \
-        2>&1 || true
+        2>&1 || launch_rc=$?
 
-    # Push saves back up after the game exits.
-    echo ""
-    echo -e "  ${DIM}Syncing cloud saves back up...${NC}"
-    $LEGENDARY_CMD -y sync-saves "$game_name" 2>/dev/null || true
+    if [[ $launch_rc -eq 0 ]]; then
+        # legendary returns as soon as the game process SPAWNS — wait for the
+        # prefix's wine processes to drain before uploading, or we would sync
+        # the pre-game state while the game is still running.
+        "${WINESERVER:-${WINE_BIN}/wineserver}" -w 2>/dev/null || true
+        echo ""
+        echo -e "  ${DIM}Syncing cloud saves back up...${NC}"
+        sync_out=$($LEGENDARY_CMD -y sync-saves --accept-path "$game_name" 2>&1) \
+            || echo -e "  ${YELLOW}Cloud-save sync failed: $(printf '%s\n' "$sync_out" | tail -1)${NC}"
+    fi
+    return $launch_rc
 }
 
 epic_info() {
@@ -932,9 +944,9 @@ ensure_winetricks() {
 }
 
 tricks_cmd() {
-    local prefix="${WINEPREFIX}"
+    local use_gptk=0
     if [[ "${1:-}" == "--gptk" ]]; then
-        prefix="${WINEPREFIX}-gptk"
+        use_gptk=1
         shift
     fi
     if [[ $# -eq 0 ]]; then
@@ -944,16 +956,62 @@ tricks_cmd() {
         echo "  --gptk        Apply to the dedicated GPTK prefix instead"
         return 1
     fi
-    if [[ ! -x "${WINE_BIN}/wine" ]]; then
-        echo -e "${RED}wine not found at ${WINE_BIN}/wine — run ./setup.sh first.${NC}" >&2
-        return 1
+    # A stray --gptk after the verbs would silently target the WRONG prefix.
+    local a
+    for a in "$@"; do
+        if [[ "$a" == "--gptk" ]]; then
+            echo -e "${RED}--gptk must come before the verbs.${NC}" >&2
+            return 1
+        fi
+    done
+
+    local prefix wine_bin wineserver_bin wrapper_env
+    if [[ $use_gptk -eq 1 ]]; then
+        # The GPTK prefix belongs to GPTK's Wine (7.7) — running the bundled
+        # 11.7 against it is exactly the version churn the dedicated prefix
+        # exists to prevent, and creating it here with 11.7 would also skip
+        # the launchers' one-time init (users symlink included).
+        local gptk_wine="/Applications/Game Porting Toolkit.app/Contents/Resources/wine/bin/wine64"
+        if [[ ! -x "$gptk_wine" ]]; then
+            echo -e "${RED}Game Porting Toolkit not found.${NC}" >&2
+            echo "  Install it: brew install --cask gcenx/wine/game-porting-toolkit" >&2
+            return 1
+        fi
+        # shellcheck source=common.sh
+        source "${SCRIPT_DIR}/common.sh"
+        vineport_gptk_prefix "${WINEPREFIX}" "$gptk_wine"
+        prefix="${GPTK_PREFIX}"
+        wine_bin="$gptk_wine"
+        wineserver_bin="$(dirname "$gptk_wine")/wineserver"
+        wrapper_env='unset DYLD_LIBRARY_PATH WINEDATADIR'
+    else
+        if [[ ! -x "${WINE_BIN}/wine" ]]; then
+            echo -e "${RED}wine not found at ${WINE_BIN}/wine — run ./setup.sh first.${NC}" >&2
+            return 1
+        fi
+        prefix="${WINEPREFIX}"
+        wine_bin="${WINE_BIN}/wine"
+        wineserver_bin="${WINE_BIN}/wineserver"
+        wrapper_env="export WINEDATADIR=\"${WINE_DIR}/share/wine\"
+export DYLD_LIBRARY_PATH=\"${WINE_DIR}/lib\""
     fi
     ensure_winetricks || return 1
     if ! command -v cabextract &>/dev/null; then
         echo -e "${YELLOW}Note: many winetricks verbs need cabextract: brew install cabextract${NC}"
     fi
+    # SIP strips DYLD_* whenever a protected binary (like winetricks' /bin/sh)
+    # is exec'd, so hand winetricks a wrapper that sets the Wine env itself
+    # right before exec'ing the real wine binary.
+    local wrapper="${HOME}/.cache/vineport/wine-env-wrapper.sh"
+    cat > "$wrapper" <<WRAP
+#!/bin/bash
+${wrapper_env}
+exec "${wine_bin}" "\$@"
+WRAP
+    chmod +x "$wrapper"
     echo -e "${BOLD}winetricks $* ${NC}${DIM}(prefix: ${prefix})${NC}"
-    WINE="${WINE_BIN}/wine" WINESERVER="${WINE_BIN}/wineserver" WINEPREFIX="$prefix" \
+    WINE="$wrapper" WINESERVER="$wineserver_bin" WINEPREFIX="$prefix" \
+        WINEARCH=win64 PATH="$(dirname "$wine_bin"):${PATH}" \
         "${WINETRICKS_CACHE}" --unattended "$@"
 }
 
